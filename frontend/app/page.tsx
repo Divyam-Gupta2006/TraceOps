@@ -533,6 +533,55 @@ socket.on('project:join:error', (error) => {
     };
   }, [traces]);
 
+  // Extract and aggregate Core Web Vitals from browser telemetry spans
+  const webVitalsMetrics = useMemo(() => {
+    const vitals: Record<
+      string,
+      { name: string; value: number; rating: 'good' | 'needs-improvement' | 'poor'; count: number; unit: string; target: string }
+    > = {};
+
+    const targets: Record<string, { unit: string; target: string }> = {
+      LCP: { unit: 'ms', target: '≤ 2500ms' },
+      CLS: { unit: '', target: '≤ 0.1' },
+      INP: { unit: 'ms', target: '≤ 200ms' },
+      FCP: { unit: 'ms', target: '≤ 1800ms' },
+      TTFB: { unit: 'ms', target: '≤ 800ms' },
+    };
+
+    traces.forEach((t: any) => {
+      (t.spans || []).forEach((s: any) => {
+        const vName = s.attributes?.['vital.name'];
+        const vVal = s.attributes?.['vital.value'];
+        const vRating = s.attributes?.['vital.rating'];
+
+        if (vName && typeof vVal === 'number') {
+          const cfg = targets[vName] || { unit: 'ms', target: '' };
+          if (!vitals[vName]) {
+            vitals[vName] = {
+              name: vName,
+              value: vVal,
+              rating: vRating || 'good',
+              count: 1,
+              unit: cfg.unit,
+              target: cfg.target,
+            };
+          } else {
+            vitals[vName] = {
+              name: vName,
+              value: Math.round(((vitals[vName].value * vitals[vName].count + vVal) / (vitals[vName].count + 1)) * 100) / 100,
+              rating: vRating || vitals[vName].rating,
+              count: vitals[vName].count + 1,
+              unit: cfg.unit,
+              target: cfg.target,
+            };
+          }
+        }
+      });
+    });
+
+    return vitals;
+  }, [traces]);
+
   // Compute Latency Histogram Buckets for Performance Tab
   const latencyBuckets = useMemo(() => {
     const allSpans: any[] = [];
@@ -838,6 +887,99 @@ socket.on('project:join:error', (error) => {
             {/* ===================== TAB 1: OVERVIEW ===================== */}
         {activeTab === 'overview' && (
           <div className="space-y-6">
+            {/* Empty Telemetry State / Getting Started Banner */}
+            {totalRequests === 0 && (
+              <div className="rounded border border-accent/30 bg-accent/5 p-6 text-center space-y-3">
+                <div className="w-10 h-10 rounded-full bg-accent/15 border border-accent/30 flex items-center justify-center mx-auto text-accent">
+                  <Zap className="w-5 h-5" />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-sm font-semibold text-text-primary">Waiting for Telemetry</h3>
+                  <p className="text-xs text-text-secondary max-w-md mx-auto">
+                    Your project is active and ready to ingest traces, logs, errors, and Web Vitals. Install the TraceOps Browser SDK in your website to stream live events.
+                  </p>
+                </div>
+                <div className="flex items-center justify-center gap-3 pt-1">
+                  <button
+                    onClick={() => setActiveTab('connect')}
+                    className="inline-flex items-center gap-1.5 bg-accent hover:bg-accent-muted text-white text-xs font-medium px-3.5 py-1.5 rounded transition shadow-sm"
+                  >
+                    <Code2 className="w-3.5 h-3.5" /> View Connection Guide
+                  </button>
+                  <button
+                    onClick={triggerNormalTelemetry}
+                    disabled={isSimulating}
+                    className="inline-flex items-center gap-1.5 bg-surface hover:bg-surface-hover border border-border text-text-primary text-xs font-medium px-3.5 py-1.5 rounded transition"
+                  >
+                    <Zap className="w-3.5 h-3.5 text-accent" /> {isSimulating ? 'Simulating...' : 'Simulate Test Traffic'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Core Web Vitals RUM Section */}
+            {Object.keys(webVitalsMetrics).length > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between border-b border-border pb-2">
+                  <div className="flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-accent" />
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-text-primary">
+                      Core Web Vitals (Real User Monitoring)
+                    </h3>
+                  </div>
+                  <span className="text-[11px] text-text-secondary font-mono">
+                    Google RUM Targets · @traceops/browser
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                  {['LCP', 'INP', 'CLS', 'FCP', 'TTFB'].map((key) => {
+                    const item = webVitalsMetrics[key];
+                    if (!item) {
+                      return (
+                        <div key={key} className="p-3.5 rounded border border-border bg-surface/50 opacity-60">
+                          <div className="text-[11px] uppercase tracking-wider text-text-secondary font-medium">
+                            {key}
+                          </div>
+                          <div className="text-lg font-mono text-text-secondary mt-1">Pending...</div>
+                          <div className="text-[10px] text-text-muted mt-1">Awaiting telemetry</div>
+                        </div>
+                      );
+                    }
+
+                    const isGood = item.rating === 'good';
+                    const isNeedsImprovement = item.rating === 'needs-improvement';
+
+                    return (
+                      <div key={key} className="p-3.5 rounded border border-border bg-surface">
+                        <div className="flex items-center justify-between text-[11px] mb-1">
+                          <span className="uppercase tracking-wider text-text-secondary font-semibold">{item.name}</span>
+                          <span
+                            className={`text-[9px] font-semibold px-1.5 py-0.5 rounded font-mono ${
+                              isGood
+                                ? 'bg-status-success/15 text-status-success border border-status-success/30'
+                                : isNeedsImprovement
+                                ? 'bg-status-warning/15 text-status-warning border border-status-warning/30'
+                                : 'bg-status-error/15 text-status-error border border-status-error/30'
+                            }`}
+                          >
+                            {item.rating.toUpperCase()}
+                          </span>
+                        </div>
+                        <div className="text-xl font-mono font-semibold text-text-primary mt-1">
+                          {item.name === 'CLS' ? item.value.toFixed(3) : item.value}{' '}
+                          <span className="text-xs font-normal text-text-secondary">{item.unit}</span>
+                        </div>
+                        <div className="text-[10px] text-text-secondary mt-1 font-mono">
+                          Target: {item.target} ({item.count} sample{item.count > 1 ? 's' : ''})
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Section A: Actionable Service Health Overview */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               {/* Metric 1: Total Requests & RPS */}
@@ -1379,6 +1521,69 @@ socket.on('project:join:error', (error) => {
         {/* ===================== TAB 2: PERFORMANCE ===================== */}
         {activeTab === 'performance' && (
           <div className="space-y-6">
+            {/* Core Web Vitals RUM Section */}
+            {Object.keys(webVitalsMetrics).length > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between border-b border-border pb-2">
+                  <div className="flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-accent" />
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-text-primary">
+                      Core Web Vitals (Real User Monitoring)
+                    </h3>
+                  </div>
+                  <span className="text-[11px] text-text-secondary font-mono">
+                    Google RUM Targets · @traceops/browser
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                  {['LCP', 'INP', 'CLS', 'FCP', 'TTFB'].map((key) => {
+                    const item = webVitalsMetrics[key];
+                    if (!item) {
+                      return (
+                        <div key={key} className="p-3.5 rounded border border-border bg-surface/50 opacity-60">
+                          <div className="text-[11px] uppercase tracking-wider text-text-secondary font-medium">
+                            {key}
+                          </div>
+                          <div className="text-lg font-mono text-text-secondary mt-1">Pending...</div>
+                          <div className="text-[10px] text-text-muted mt-1">Awaiting telemetry</div>
+                        </div>
+                      );
+                    }
+
+                    const isGood = item.rating === 'good';
+                    const isNeedsImprovement = item.rating === 'needs-improvement';
+
+                    return (
+                      <div key={key} className="p-3.5 rounded border border-border bg-surface">
+                        <div className="flex items-center justify-between text-[11px] mb-1">
+                          <span className="uppercase tracking-wider text-text-secondary font-semibold">{item.name}</span>
+                          <span
+                            className={`text-[9px] font-semibold px-1.5 py-0.5 rounded font-mono ${
+                              isGood
+                                ? 'bg-status-success/15 text-status-success border border-status-success/30'
+                                : isNeedsImprovement
+                                ? 'bg-status-warning/15 text-status-warning border border-status-warning/30'
+                                : 'bg-status-error/15 text-status-error border border-status-error/30'
+                            }`}
+                          >
+                            {item.rating.toUpperCase()}
+                          </span>
+                        </div>
+                        <div className="text-xl font-mono font-semibold text-text-primary mt-1">
+                          {item.name === 'CLS' ? item.value.toFixed(3) : item.value}{' '}
+                          <span className="text-xs font-normal text-text-secondary">{item.unit}</span>
+                        </div>
+                        <div className="text-[10px] text-text-secondary mt-1 font-mono">
+                          Target: {item.target} ({item.count} sample{item.count > 1 ? 's' : ''})
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Latency Percentile Cards */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               {[
@@ -2071,19 +2276,49 @@ socket.on('project:join:error', (error) => {
 
               {/* Integration Snippets */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Method 1: Drop-In Frontend Snippet */}
+                {/* Method 1: Official TraceOps Browser SDK */}
                 <div className="rounded border border-border bg-surface p-4 space-y-2.5">
                   <div className="flex items-center justify-between">
                     <h4 className="text-xs font-semibold uppercase tracking-wider text-text-primary flex items-center gap-1.5">
-                      <Globe className="w-3.5 h-3.5 text-accent" /> 1. Drop-In Frontend Snippet
+                      <Zap className="w-3.5 h-3.5 text-accent" /> 1. Browser SDK (@traceops/browser)
                     </h4>
-                    <span className="text-[10px] font-mono text-text-secondary">React / Next.js / HTML</span>
+                    <span className="text-[10px] font-mono text-status-success font-semibold">Recommended</span>
                   </div>
                   <p className="text-xs text-text-secondary">
-                    No packages required. Captures pageviews and unhandled client errors:
+                    Automatic JS errors, Web Vitals (LCP, CLS, INP), pageviews, and custom spans:
                   </p>
                   <pre className="p-3 rounded bg-bg border border-border text-[11px] font-mono text-text-primary overflow-x-auto">
-{`const TRACEOPS_URL = 'http://localhost:4000'; // Or your deployed URL
+{`npm install @traceops/browser
+
+import { TraceOps } from '@traceops/browser';
+
+// Initialize once at website root
+TraceOps.init({
+  apiKey: '${currentProject.apiKey}',
+  endpoint: 'http://localhost:4000', // Or your backend URL
+  serviceName: '${currentProject.name}',
+});
+
+// Automatic: Captures window errors, unhandled rejections, Core Web Vitals, and page loads
+// Optional: Manually capture spans or logs
+TraceOps.captureSpan({ name: 'checkout-submit', durationMs: 45 });
+TraceOps.captureLog({ message: 'User updated cart', severity: 'INFO' });`}
+                  </pre>
+                </div>
+
+                {/* Method 2: Vanilla Drop-In Snippet (Zero Dependencies) */}
+                <div className="rounded border border-border bg-surface p-4 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-text-primary flex items-center gap-1.5">
+                      <Globe className="w-3.5 h-3.5 text-accent" /> 2. Vanilla Drop-In Snippet
+                    </h4>
+                    <span className="text-[10px] font-mono text-text-secondary">HTML / Script tag</span>
+                  </div>
+                  <p className="text-xs text-text-secondary">
+                    Zero packages required. Lightweight OTLP fetch helper:
+                  </p>
+                  <pre className="p-3 rounded bg-bg border border-border text-[11px] font-mono text-text-primary overflow-x-auto">
+{`const TRACEOPS_URL = 'http://localhost:4000';
 
 function reportTrace(op, durationMs = 50, isError = false) {
   fetch(\`\${TRACEOPS_URL}/v1/traces\`, {
@@ -2099,12 +2334,6 @@ function reportTrace(op, durationMs = 50, isError = false) {
       statusCode: isError ? 2 : 1,
     }),
   }).catch(() => {});
-}
-
-// Auto-track on client
-if (typeof window !== 'undefined') {
-  reportTrace('pageview: ' + window.location.pathname);
-  window.addEventListener('error', (e) => reportTrace('error: ' + e.message, 100, true));
 }`}
                   </pre>
                 </div>

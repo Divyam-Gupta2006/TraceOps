@@ -1,0 +1,13 @@
+{
+  "name": "traceops-demo-website",
+  "version": "1.0.0",
+  "description": "Standalone demonstration website integrated with @traceops/browser SDK",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@traceops/browser": "file:../.."
+  }
+}
+

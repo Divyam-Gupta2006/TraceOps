@@ -1,0 +1,44 @@
+{
+  "name": "@traceops/browser",
+  "version": "0.1.0",
+  "description": "Lightweight TraceOps Browser Observability & Telemetry SDK",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    }
+  },
+  "files": [
+    "dist/cjs",
+    "dist/esm",
+    "dist/types"
+  ],
+  "scripts": {
+    "build:esm": "tsc -p tsconfig.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build:test": "tsc -p tsconfig.test.json",
+    "build": "npm run build:esm && npm run build:cjs && npm run build:test",
+    "test": "node --test dist/test/test",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "traceops",
+    "observability",
+    "telemetry",
+    "opentelemetry",
+    "browser",
+    "apm",
+    "monitoring"
+  ],
+  "author": "TraceOps",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "typescript": "^5.4.5"
+  }
+}
