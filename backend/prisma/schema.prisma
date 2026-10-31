@@ -7,16 +7,33 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String?
+  passwordHash String
+  role         String    @default("USER") // USER, ADMIN
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  projects     Project[]
+
+  @@index([email])
+}
+
 model Project {
   id          String     @id @default(cuid())
   name        String
   framework   String     @default("OpenTelemetry / Generic")
   apiKey      String     @unique
+  ownerId     String?
+  owner       User?      @relation(fields: [ownerId], references: [id], onDelete: Restrict)
   createdAt   DateTime   @default(now())
   services    Service[]
   spans       Span[]
   logs        LogEntry[]
   incidents   Incident[]
+
+  @@index([ownerId])
 }
 
 model Service {

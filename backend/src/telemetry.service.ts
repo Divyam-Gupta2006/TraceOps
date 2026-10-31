@@ -1,4 +1,10 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  UnauthorizedException,
+  ForbiddenException,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { PrismaService } from './prisma.service';
 import { EventsGateway } from './events.gateway';
 import { AiRcaService, EvidencePacket } from './ai-rca.service';
@@ -47,30 +53,77 @@ export class TelemetryService {
     }
   }
 
-  async ensureDefaultProject() {
-    const count = await this.prisma.project.count();
-    if (count === 0) {
-      await this.createProject('E-Commerce Production App', 'Next.js · Node.js · PostgreSQL');
+  /**
+   * Asserts that a user has permission to access a project.
+   * - ADMIN role grants access to all projects (including unowned legacy projects).
+   * - USER role grants access ONLY if project.ownerId === userId.
+   * - Unowned projects (ownerId === null) are NEVER accessible to non-ADMIN users.
+   */
+  assertProjectAccess(
+    project: { id: string; ownerId: string | null; [key: string]: any },
+    userId?: string,
+    role?: string,
+  ): void {
+    if (role === 'ADMIN') {
+      return;
+    }
+    if (!userId || !project.ownerId || project.ownerId !== userId) {
+      throw new ForbiddenException(
+        'Access denied: You do not have permission to access this project.',
+      );
     }
   }
 
-  async createProject(name: string, framework = 'OpenTelemetry / Node.js') {
+  async createProject(name: string, framework = 'OpenTelemetry / Node.js', ownerId: string) {
+    if (!ownerId) {
+      throw new BadRequestException(
+        'Project owner is required. Projects cannot be created without an owner.',
+      );
+    }
     const randomHex = crypto.randomBytes(12).toString('hex');
     const apiKey = `tops_live_${randomHex}`;
     return this.prisma.project.create({
-      data: { name, framework, apiKey },
+      data: { name, framework, apiKey, ownerId },
     });
   }
 
-  async listProjects() {
-    await this.ensureDefaultProject();
-    return this.prisma.project.findMany({
+  async listProjects(userId: string, role: string) {
+    let whereClause: any;
+    if (role === 'ADMIN') {
+      whereClause = {};
+    } else {
+      whereClause = { ownerId: userId };
+    }
+
+    const projects = await this.prisma.project.findMany({
+      where: whereClause,
       orderBy: { createdAt: 'asc' },
     });
+
+    // Project API keys must never be returned by ordinary project-list endpoints
+    return projects.map((p) => ({
+      ...p,
+      apiKey: p.apiKey ? `${p.apiKey.slice(0, 14)}••••••••` : '••••••••',
+    }));
+  }
+
+  async getProjectCredentials(projectId: string, userId: string, role: string) {
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+    });
+    if (!project) {
+      throw new NotFoundException('Project not found');
+    }
+    this.assertProjectAccess(project, userId, role);
+    return {
+      id: project.id,
+      name: project.name,
+      apiKey: project.apiKey,
+    };
   }
 
   async validateApiKey(apiKey?: string) {
-    if (!apiKey) {
+    if (!apiKey || typeof apiKey !== 'string' || apiKey.trim().length === 0) {
       throw new UnauthorizedException(
         'Missing API key. Provide via x-traceops-key header, Authorization: Bearer <key>, or ?apiKey=<key>',
       );
@@ -80,11 +133,15 @@ export class TelemetryService {
       .replace(/^Bearer\s+/i, '')
       .replace(/^['"]|['"]$/g, '');
 
+    if (!cleanKey) {
+      throw new UnauthorizedException('Missing or empty API key.');
+    }
+
     const project = await this.prisma.project.findUnique({
       where: { apiKey: cleanKey },
     });
     if (!project) {
-      throw new UnauthorizedException(`Invalid TraceOps API key: "${cleanKey.slice(0, 10)}..."`);
+      throw new UnauthorizedException('Invalid or unknown TraceOps API key.');
     }
     return project;
   }
@@ -669,9 +726,21 @@ export class TelemetryService {
     }
   }
 
-  async getProjectDashboard(projectId: string, windowParam = '1h') {
-    const [project, totalRequestsCount, services, recentSpans, recentLogs, incidents] = await Promise.all([
-      this.prisma.project.findUnique({ where: { id: projectId } }),
+  async getProjectDashboard(
+    projectId: string,
+    windowParam = '1h',
+    userId?: string,
+    role?: string,
+  ) {
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+    });
+    if (!project) {
+      throw new NotFoundException('Project not found');
+    }
+    this.assertProjectAccess(project, userId, role);
+
+    const [totalRequestsCount, services, recentSpans, recentLogs, incidents] = await Promise.all([
       this.prisma.span.count({ where: { projectId } }),
       this.prisma.service.findMany({
         where: { projectId },
@@ -1033,7 +1102,10 @@ export class TelemetryService {
       });
 
     return {
-      project,
+      project: {
+        ...project,
+        apiKey: project.apiKey ? `${project.apiKey.slice(0, 14)}••••••••` : '••••••••',
+      },
       timeWindow: windowParam,
       systemHealth: {
         totalRequests,
@@ -1068,9 +1140,13 @@ export class TelemetryService {
     };
   }
 
-  async resolveIncident(incidentId: string) {
-    const inc = await this.prisma.incident.findUnique({ where: { id: incidentId } });
+  async resolveIncident(incidentId: string, userId: string, role: string) {
+    const inc = await this.prisma.incident.findUnique({
+      where: { id: incidentId },
+      include: { project: true },
+    });
     if (!inc) return null;
+    this.assertProjectAccess(inc.project, userId, role);
 
     const resolved = await this.prisma.incident.update({
       where: { id: incidentId },
@@ -1101,7 +1177,17 @@ export class TelemetryService {
   }
 
   // Built-in OTLP traffic generator so you can test Normal vs Incident flows in 1 click
-  async simulateScenario(projectId: string, mode: 'normal' | 'incident') {
+  async simulateScenario(
+    projectId: string,
+    mode: 'normal' | 'incident',
+    userId: string,
+    role: string,
+  ) {
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+    this.assertProjectAccess(project, userId, role);
     const nowNs = BigInt(Date.now()) * 1_000_000n;
     const isIncident = mode === 'incident';
     const batchCount = isIncident ? 4 : 3;

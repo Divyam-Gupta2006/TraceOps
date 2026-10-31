@@ -12,9 +12,15 @@ import {
   Code2,
   Copy,
   Cpu,
+  Eye,
+  EyeOff,
   FileText,
   Globe,
+  Key,
   Layers,
+  Lock,
+  LogIn,
+  LogOut,
   Moon,
   Network,
   Plus,
@@ -24,6 +30,7 @@ import {
   ShieldAlert,
   Sun,
   Terminal,
+  User,
   Zap,
 } from 'lucide-react';
 import ServiceMap from '@/components/ServiceMap';
@@ -58,6 +65,20 @@ export default function TraceOpsApp() {
   const [testingConnection, setTestingConnection] = useState<boolean>(false);
   const [connectionTestResult, setConnectionTestResult] = useState<string | null>(null);
 
+  // Authentication & Multi-Tenancy State
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authEmail, setAuthEmail] = useState<string>('');
+  const [authPassword, setAuthPassword] = useState<string>('');
+  const [authName, setAuthName] = useState<string>('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(false);
+  const [projectCredentials, setProjectCredentials] = useState<{ id: string; name: string; apiKey: string } | null>(null);
+  const [credentialError, setCredentialError] = useState<string | null>(null);
+  const [showRawKey, setShowRawKey] = useState<boolean>(false);
+
   // Filters
   const [traceSearch, setTraceSearch] = useState<string>('');
   const [traceStatusFilter, setTraceStatusFilter] = useState<'all' | 'error' | 'ok'>('all');
@@ -73,6 +94,27 @@ export default function TraceOpsApp() {
     document.documentElement.classList.toggle('light', initial === 'light');
   }, []);
 
+  // Restore JWT session on startup
+  useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null;
+    if (token) {
+      setAuthToken(token);
+      fetch(`${API_BASE}/api/auth/me`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then((res) => {
+          if (res.ok) return res.json();
+          throw new Error('Session expired');
+        })
+        .then((user) => setCurrentUser(user))
+        .catch(() => {
+          if (typeof window !== 'undefined') localStorage.removeItem('traceops_jwt');
+          setAuthToken(null);
+          setCurrentUser(null);
+        });
+    }
+  }, []);
+
   const toggleTheme = () => {
     const next = theme === 'dark' ? 'light' : 'dark';
     setTheme(next);
@@ -85,8 +127,18 @@ export default function TraceOpsApp() {
 
   const fetchProjects = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/projects`);
-      if (!res.ok) return;
+      const headers: Record<string, string> = {};
+      const token = authToken || (typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null);
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch(`${API_BASE}/api/projects`, { headers });
+      if (!res.ok) {
+        if (res.status === 401) {
+          setProjects([]);
+          setActiveProjectId('');
+          setDashboard(null);
+        }
+        return;
+      }
       const data = await res.json();
       setProjects(data);
       if (data.length > 0) {
@@ -96,32 +148,130 @@ export default function TraceOpsApp() {
           if (prev && data.some((p: any) => p.id === prev)) return prev;
           return matched ? matched.id : data[0].id;
         });
+      } else {
+        setActiveProjectId('');
+        setDashboard(null);
       }
     } catch (err) {
       console.error('Failed to fetch projects:', err);
     }
-  }, []);
+  }, [authToken]);
 
-  const fetchDashboard = useCallback(async (projId: string, windowArg = timeWindow, isSilent = false) => {
-    if (!projId) return;
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${projId}/dashboard?window=${windowArg}&_t=${Date.now()}`, {
-        cache: 'no-store',
-        headers: {
+  const fetchDashboard = useCallback(
+    async (projId: string, windowArg = timeWindow, isSilent = false) => {
+      if (!projId) return;
+      try {
+        const headers: Record<string, string> = {
           'Cache-Control': 'no-cache, no-store, must-revalidate',
           Pragma: 'no-cache',
-        },
-      });
-      if (!res.ok) return;
-      const data = await res.json();
-      setDashboard(data);
-      if (!isSilent) {
-        setSelectedTrace((prev: any) => prev || (data.traces?.length > 0 ? data.traces[0] : null));
+        };
+        const token = authToken || (typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null);
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const res = await fetch(
+          `${API_BASE}/api/projects/${projId}/dashboard?window=${windowArg}&_t=${Date.now()}`,
+          {
+            cache: 'no-store',
+            headers,
+          },
+        );
+        if (res.status === 401) {
+          setDashboard({ error: 'Authentication Required: Please sign in to view project telemetry.' });
+          return;
+        }
+        if (res.status === 403) {
+          setDashboard({ error: 'Access Denied: You do not have permission to view telemetry for this project.' });
+          return;
+        }
+        if (!res.ok) return;
+        const data = await res.json();
+        setDashboard(data);
+        if (!isSilent) {
+          setSelectedTrace((prev: any) => prev || (data.traces?.length > 0 ? data.traces[0] : null));
+        }
+      } catch (err) {
+        console.error('Failed to fetch dashboard:', err);
       }
-    } catch (err) {
-      console.error('Failed to fetch dashboard:', err);
+    },
+    [timeWindow, authToken],
+  );
+
+  const fetchProjectCredentials = useCallback(
+    async (projId: string) => {
+      if (!projId) return;
+      try {
+        const headers: Record<string, string> = {};
+        const token = authToken || (typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null);
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const res = await fetch(`${API_BASE}/api/projects/${projId}/credentials`, { headers });
+        if (res.ok) {
+          const data = await res.json();
+          setProjectCredentials(data);
+          setCredentialError(null);
+        } else if (res.status === 403) {
+          setProjectCredentials(null);
+          setCredentialError('Restricted: Ingestion API keys are only visible to the project owner or administrators.');
+        } else {
+          setProjectCredentials(null);
+        }
+      } catch (err) {
+        console.error('Failed to fetch credentials:', err);
+      }
+    },
+    [authToken],
+  );
+
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setAuthLoading(true);
+    try {
+      const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
+      const body: any = { email: authEmail, password: authPassword };
+      if (authMode === 'register' && authName.trim()) {
+        body.name = authName.trim();
+      }
+      const res = await fetch(`${API_BASE}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || 'Authentication failed');
+      }
+      setAuthToken(data.token);
+      setCurrentUser(data.user);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('traceops_jwt', data.token);
+      }
+      setAuthModalOpen(false);
+      setAuthEmail('');
+      setAuthPassword('');
+      setAuthName('');
+      fetchProjects();
+    } catch (err: any) {
+      setAuthError(err.message || 'An error occurred during authentication.');
+    } finally {
+      setAuthLoading(false);
     }
-  }, [timeWindow]);
+  };
+
+  const handleLogout = () => {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('traceops_jwt');
+    }
+    setAuthToken(null);
+    setCurrentUser(null);
+    setProjectCredentials(null);
+    setShowRawKey(false);
+    fetchProjects();
+  };
+
+  useEffect(() => {
+    if (activeProjectId && activeTab === 'connect') {
+      fetchProjectCredentials(activeProjectId);
+    }
+  }, [activeProjectId, activeTab, fetchProjectCredentials]);
 
   useEffect(() => {
     fetchProjects();
@@ -134,15 +284,39 @@ export default function TraceOpsApp() {
       }
       fetchDashboard(activeProjectId, timeWindow);
     }
-  }, [activeProjectId, timeWindow, fetchDashboard]);
+  }, [activeProjectId, timeWindow, fetchDashboard, authToken]);
 
   // Real-time WebSocket subscription + 3s Heartbeat
   useEffect(() => {
     if (!activeProjectId) return;
+    const token =
+      authToken ||
+      (typeof window !== 'undefined'
+        ? localStorage.getItem('traceops_jwt')
+        : null);
+
+    if (!token) return;
+
     const socket: Socket = io(API_BASE, {
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 20,
+      auth: { token },
     });
+    const joinProjectRoom = () => {
+  socket.emit('project:join', {
+    projectId: activeProjectId,
+  });
+};
+
+socket.on('connect', joinProjectRoom);
+
+if (socket.connected) {
+  joinProjectRoom();
+}
+
+socket.on('project:join:error', (error) => {
+  console.error('WebSocket project access denied:', error.message);
+});
 
     const onIncoming = (payload?: any) => {
       setLivePulse(true);
@@ -171,9 +345,7 @@ export default function TraceOpsApp() {
     };
 
     socket.on(`telemetry:${activeProjectId}`, onIncoming);
-    socket.on('telemetry:stream', (payload: any) => {
-      if (payload?.projectId === activeProjectId) onIncoming(payload);
-    });
+
     socket.on(`incident:${activeProjectId}`, () => onIncoming());
 
     const intervalMs = timeWindow === '10s' ? 1000 : 3000;
@@ -187,15 +359,18 @@ export default function TraceOpsApp() {
       socket.disconnect();
       clearInterval(interval);
     };
-  }, [activeProjectId, timeWindow, fetchDashboard]);
+  }, [activeProjectId, timeWindow, fetchDashboard, authToken]);
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newProjectName.trim()) return;
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const token = authToken || (typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null);
+      if (token) headers['Authorization'] = `Bearer ${token}`;
       const res = await fetch(`${API_BASE}/api/projects`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ name: newProjectName, framework: newProjectStack }),
       });
       if (!res.ok) return;
@@ -206,6 +381,7 @@ export default function TraceOpsApp() {
       setNewProjectName('');
       setNewProjectModal(false);
       setActiveTab('connect');
+      fetchProjectCredentials(created.id);
     } catch (err) {
       console.error('Failed to create project:', err);
     }
@@ -215,9 +391,12 @@ export default function TraceOpsApp() {
     if (!activeProjectId) return;
     setIsSimulating(true);
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const token = authToken || (typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null);
+      if (token) headers['Authorization'] = `Bearer ${token}`;
       await fetch(`${API_BASE}/api/projects/${activeProjectId}/simulate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ mode: 'normal' }),
       });
       await fetchDashboard(activeProjectId);
@@ -230,15 +409,27 @@ export default function TraceOpsApp() {
 
   const handleResolveIncident = async (id: string) => {
     try {
-      await fetch(`${API_BASE}/api/incidents/${id}/resolve`, { method: 'POST' });
+      const headers: Record<string, string> = {};
+      const token = authToken || (typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null);
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      await fetch(`${API_BASE}/api/incidents/${id}/resolve`, { method: 'POST', headers });
       fetchDashboard(activeProjectId);
     } catch (err) {
       console.error('Failed to resolve incident:', err);
     }
   };
 
+  const copyText = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedKey(true);
+    setTimeout(() => setCopiedKey(false), 2000);
+  };
+
+  const currentProject = dashboard?.project;
+  const activeApiKey = projectCredentials?.apiKey || currentProject?.apiKey;
+
   const testIngestionPing = async () => {
-    if (!currentProject?.apiKey) return;
+    if (!activeApiKey) return;
     setTestingConnection(true);
     setConnectionTestResult(null);
     try {
@@ -246,10 +437,10 @@ export default function TraceOpsApp() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-traceops-key': currentProject.apiKey,
+          'x-traceops-key': activeApiKey,
         },
         body: JSON.stringify({
-          serviceName: currentProject.name || 'test-client',
+          serviceName: currentProject?.name || 'test-client',
           operationName: 'GET /health-check',
           durationMs: 45,
           statusCode: 200,
@@ -268,14 +459,6 @@ export default function TraceOpsApp() {
       setTestingConnection(false);
     }
   };
-
-  const copyText = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedKey(true);
-    setTimeout(() => setCopiedKey(false), 2000);
-  };
-
-  const currentProject = dashboard?.project;
   const traces = dashboard?.traces || [];
   const serviceMetrics = dashboard?.serviceMetrics || [];
   const rawLogs = dashboard?.recentLogs || [];
@@ -572,6 +755,47 @@ export default function TraceOpsApp() {
             <Zap className="w-3 h-3 text-accent" /> Send Normal Telemetry
           </button>
 
+          {/* User Auth Session Pill */}
+          {currentUser ? (
+            <div className="flex items-center gap-1.5 pl-1">
+              <div className="flex items-center gap-1.5 px-2 py-1 rounded border border-border bg-bg text-xs">
+                <User className="w-3.5 h-3.5 text-accent" />
+                <span className="font-medium text-text-primary max-w-[120px] truncate" title={currentUser.email}>
+                  {currentUser.name || currentUser.email}
+                </span>
+                <span
+                  className={`text-[9px] font-mono px-1 py-0.2 rounded border font-semibold ${
+                    currentUser.role === 'ADMIN'
+                      ? 'border-purple-500/40 text-purple-400 bg-purple-500/10'
+                      : 'border-border text-text-secondary bg-surface'
+                  }`}
+                >
+                  {currentUser.role}
+                </span>
+              </div>
+              <button
+                onClick={handleLogout}
+                className="p-1.5 rounded border border-border bg-bg hover:bg-surface-hover text-text-secondary hover:text-status-error transition"
+                title="Sign Out"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => {
+                setAuthModalOpen(true);
+                setAuthMode('login');
+                setAuthError(null);
+              }}
+              className="flex items-center gap-1.5 bg-accent/10 hover:bg-accent/20 text-accent border border-accent/30 px-2.5 py-1 rounded transition text-xs font-medium"
+            >
+              <LogIn className="w-3 h-3" /> Sign In
+            </button>
+          )}
+
+          <div className="h-4 w-px bg-border" />
+
           {/* Dark / Light Mode Toggle */}
           <button
             onClick={toggleTheme}
@@ -627,7 +851,33 @@ export default function TraceOpsApp() {
 
       {/* Main Container */}
       <main className="flex-1 max-w-[1400px] w-full mx-auto p-5 space-y-5">
-        {/* ===================== TAB 1: OVERVIEW ===================== */}
+        {dashboard?.error ? (
+          <div className="rounded border border-status-error/30 bg-status-error/10 p-10 text-center space-y-3 my-8">
+            <ShieldAlert className="w-12 h-12 text-status-error mx-auto" />
+            <h3 className="text-base font-semibold text-text-primary">Project Access Restricted</h3>
+            <p className="text-sm text-text-secondary max-w-md mx-auto">
+              {dashboard.error}
+            </p>
+            <p className="text-xs text-text-muted">
+              Sign in with an account that owns this project or select an authorized project.
+            </p>
+            {!currentUser && (
+              <div className="pt-2">
+                <button
+                  onClick={() => {
+                    setAuthModalOpen(true);
+                    setAuthMode('login');
+                  }}
+                  className="px-4 py-2 bg-accent hover:bg-accent-muted text-white text-xs font-medium rounded transition"
+                >
+                  Sign In to Continue
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
+            {/* ===================== TAB 1: OVERVIEW ===================== */}
         {activeTab === 'overview' && (
           <div className="space-y-6">
             {/* Section A: Actionable Service Health Overview */}
@@ -1788,11 +2038,28 @@ export default function TraceOpsApp() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-xs">
-                  <div className="bg-bg border border-border rounded px-3 py-1.5 text-status-success">
-                    {currentProject.apiKey}
+                  <div className="bg-bg border border-border rounded px-3 py-1.5 text-status-success flex items-center gap-2">
+                    <Key className="w-3.5 h-3.5 text-text-secondary" />
+                    <span>
+                      {showRawKey && projectCredentials?.apiKey
+                        ? projectCredentials.apiKey
+                        : currentProject.apiKey}
+                    </span>
                   </div>
+
+                  {projectCredentials?.apiKey && (
+                    <button
+                      onClick={() => setShowRawKey(!showRawKey)}
+                      className="flex items-center gap-1 bg-border hover:bg-border-strong text-text-primary px-2.5 py-1.5 rounded transition"
+                      title={showRawKey ? 'Hide key' : 'Reveal unmasked key'}
+                    >
+                      {showRawKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      {showRawKey ? 'Hide' : 'Reveal'}
+                    </button>
+                  )}
+
                   <button
-                    onClick={() => copyText(currentProject.apiKey)}
+                    onClick={() => copyText(activeApiKey || currentProject.apiKey)}
                     className="flex items-center gap-1 bg-border hover:bg-border-strong text-text-primary px-3 py-1.5 rounded transition"
                   >
                     <Copy className="w-3.5 h-3.5" />
@@ -1807,6 +2074,12 @@ export default function TraceOpsApp() {
                     <Zap className="w-3.5 h-3.5 text-accent" />
                     {testingConnection ? 'Pinging...' : 'Send Test Ping'}
                   </button>
+
+                  {credentialError && (
+                    <span className="text-[11px] font-sans text-status-warning bg-status-warning/10 border border-status-warning/30 px-2 py-1 rounded">
+                      {credentialError}
+                    </span>
+                  )}
 
                   {connectionTestResult && (
                     <span
@@ -1947,6 +2220,8 @@ node simulator/simulate.js ${currentProject.apiKey} normal`}
             </div>
           )
         )}
+          </>
+        )}
       </main>
 
       {/* New Project Modal */}
@@ -1995,6 +2270,136 @@ node simulator/simulate.js ${currentProject.apiKey} normal`}
               >
                 Create Project
               </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* User Authentication Modal */}
+      {authModalOpen && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <form
+            onSubmit={handleAuthSubmit}
+            className="bg-surface border border-border rounded p-6 max-w-sm w-full space-y-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <Lock className="w-4 h-4 text-accent" />
+                <h3 className="text-sm font-semibold text-text-primary">
+                  {authMode === 'login' ? 'Sign In to TraceOps' : 'Create an Account'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAuthModalOpen(false)}
+                className="text-xs text-text-muted hover:text-text-primary"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Mode Switcher */}
+            <div className="grid grid-cols-2 gap-1 p-1 bg-bg rounded border border-border text-xs">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('login');
+                  setAuthError(null);
+                }}
+                className={`py-1.5 rounded transition ${
+                  authMode === 'login'
+                    ? 'bg-surface text-text-primary font-semibold shadow-sm'
+                    : 'text-text-secondary hover:text-text-primary'
+                }`}
+              >
+                Sign In
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('register');
+                  setAuthError(null);
+                }}
+                className={`py-1.5 rounded transition ${
+                  authMode === 'register'
+                    ? 'bg-surface text-text-primary font-semibold shadow-sm'
+                    : 'text-text-secondary hover:text-text-primary'
+                }`}
+              >
+                Register
+              </button>
+            </div>
+
+            {authError && (
+              <div className="p-2.5 rounded border border-status-error/30 bg-status-error/10 text-status-error text-xs">
+                {authError}
+              </div>
+            )}
+
+            {authMode === 'register' && (
+              <div>
+                <label className="block text-[11px] uppercase tracking-wider text-text-secondary mb-1">
+                  Full Name (Optional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Alice SRE"
+                  value={authName}
+                  onChange={(e) => setAuthName(e.target.value)}
+                  className="w-full bg-bg border border-border rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent"
+                />
+              </div>
+            )}
+
+            <div>
+              <label className="block text-[11px] uppercase tracking-wider text-text-secondary mb-1">
+                Email Address
+              </label>
+              <input
+                type="email"
+                required
+                placeholder="alice@traceops.io"
+                value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+                className="w-full bg-bg border border-border rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] uppercase tracking-wider text-text-secondary mb-1">
+                Password
+              </label>
+              <input
+                type="password"
+                required
+                minLength={6}
+                placeholder="••••••••"
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                className="w-full bg-bg border border-border rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent"
+              />
+            </div>
+
+            <div className="pt-2 flex items-center justify-between gap-3">
+              <span className="text-[10px] text-text-muted">
+                {authMode === 'register' ? 'First account is granted Admin.' : 'Tenant data is isolated.'}
+              </span>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAuthModalOpen(false)}
+                  className="text-xs px-3 py-1.5 rounded border border-border text-text-secondary hover:text-text-primary hover:bg-surface-hover"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={authLoading}
+                  className="text-xs px-4 py-1.5 rounded bg-accent hover:bg-accent-muted text-white font-medium disabled:opacity-50"
+                >
+                  {authLoading ? 'Please wait...' : authMode === 'login' ? 'Sign In' : 'Create Account'}
+                </button>
+              </div>
             </div>
           </form>
         </div>
