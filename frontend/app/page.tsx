@@ -206,10 +206,10 @@ export default function TraceOpsApp() {
   };
 
   useEffect(() => {
-    if (activeProjectId && activeTab === 'connect') {
+    if (activeProjectId) {
       fetchProjectCredentials(activeProjectId);
     }
-  }, [activeProjectId, activeTab, fetchProjectCredentials]);
+  }, [activeProjectId, fetchProjectCredentials]);
 
   useEffect(() => {
     fetchProjects();
@@ -311,11 +311,13 @@ socket.on('project:join:error', (error) => {
       const created = await res.json();
       setProjects((prev) => [...prev, created]);
       setActiveProjectId(created.id);
+      setProjectCredentials({ id: created.id, name: created.name, apiKey: created.apiKey });
+      setShowRawKey(true);
       setSelectedTrace(null);
       setNewProjectName('');
       setNewProjectModal(false);
       setActiveTab('connect');
-      fetchProjectCredentials(created.id);
+      fetchDashboard(created.id, timeWindow);
     } catch (err) {
       console.error('Failed to create project:', err);
     }
@@ -359,8 +361,14 @@ socket.on('project:join:error', (error) => {
     setTimeout(() => setCopiedKey(false), 2000);
   };
 
-  const currentProject = dashboard?.project;
-  const activeApiKey = projectCredentials?.apiKey || currentProject?.apiKey;
+  const currentProject = useMemo(() => {
+    if (dashboard?.project) return dashboard.project;
+    const match = projects.find((p: any) => p.id === activeProjectId);
+    if (match) return match;
+    return projects.length > 0 ? projects[0] : null;
+  }, [dashboard, projects, activeProjectId]);
+
+  const activeApiKey = projectCredentials?.apiKey || (currentProject?.apiKey?.includes('••••') ? '' : currentProject?.apiKey) || '';
 
   const testIngestionPing = async () => {
     if (!activeApiKey) return;
@@ -887,32 +895,148 @@ socket.on('project:join:error', (error) => {
             {/* ===================== TAB 1: OVERVIEW ===================== */}
         {activeTab === 'overview' && (
           <div className="space-y-6">
-            {/* Empty Telemetry State / Getting Started Banner */}
+            {/* Empty Telemetry State / Getting Started Quickstart */}
             {totalRequests === 0 && (
-              <div className="rounded border border-accent/30 bg-accent/5 p-6 text-center space-y-3">
-                <div className="w-10 h-10 rounded-full bg-accent/15 border border-accent/30 flex items-center justify-center mx-auto text-accent">
-                  <Zap className="w-5 h-5" />
-                </div>
-                <div className="space-y-1">
-                  <h3 className="text-sm font-semibold text-text-primary">Waiting for Telemetry</h3>
-                  <p className="text-xs text-text-secondary max-w-md mx-auto">
-                    Your project is active and ready to ingest traces, logs, errors, and Web Vitals. Install the TraceOps Browser SDK in your website to stream live events.
-                  </p>
-                </div>
-                <div className="flex items-center justify-center gap-3 pt-1">
+              <div className="rounded border border-accent/40 bg-surface p-6 space-y-4 shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-full bg-accent/15 border border-accent/30 flex items-center justify-center text-accent">
+                      <Zap className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-semibold text-text-primary">
+                        Connect Your Website to TraceOps
+                      </h3>
+                      <p className="text-xs text-text-secondary">
+                        Project &ldquo;{currentProject?.name}&rdquo; is active. Add this 4-line snippet to your website to start collecting real-time telemetry.
+                      </p>
+                    </div>
+                  </div>
                   <button
                     onClick={() => setActiveTab('connect')}
-                    className="inline-flex items-center gap-1.5 bg-accent hover:bg-accent-muted text-white text-xs font-medium px-3.5 py-1.5 rounded transition shadow-sm"
+                    className="inline-flex items-center gap-1.5 text-xs text-accent hover:underline font-medium"
                   >
-                    <Code2 className="w-3.5 h-3.5" /> View Connection Guide
+                    View All SDK Options →
                   </button>
-                  <button
-                    onClick={triggerNormalTelemetry}
-                    disabled={isSimulating}
-                    className="inline-flex items-center gap-1.5 bg-surface hover:bg-surface-hover border border-border text-text-primary text-xs font-medium px-3.5 py-1.5 rounded transition"
-                  >
-                    <Zap className="w-3.5 h-3.5 text-accent" /> {isSimulating ? 'Simulating...' : 'Simulate Test Traffic'}
-                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Step 1: Install */}
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
+                      Step 1: Install Package
+                    </div>
+                    <pre className="p-2.5 rounded bg-bg border border-border text-xs font-mono text-text-primary flex items-center justify-between">
+                      <span>npm install @traceops/browser</span>
+                      <button
+                        onClick={() => copyText('npm install @traceops/browser')}
+                        className="text-text-secondary hover:text-text-primary ml-2"
+                        title="Copy install command"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    </pre>
+                  </div>
+
+                  {/* Step 2: Copy Key */}
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
+                      Project Ingestion API Key
+                    </div>
+                    <div className="p-2 rounded bg-bg border border-border text-xs font-mono text-status-success flex items-center justify-between">
+                      <span className="truncate mr-2">
+                        {showRawKey && projectCredentials?.apiKey
+                          ? projectCredentials.apiKey
+                          : projectCredentials?.apiKey || currentProject?.apiKey || 'tops_live_••••••••'}
+                      </span>
+                      <div className="flex items-center gap-1.5 flex-shrink-0">
+                        {projectCredentials?.apiKey && (
+                          <button
+                            onClick={() => setShowRawKey(!showRawKey)}
+                            className="text-text-secondary hover:text-text-primary text-[11px] font-sans"
+                          >
+                            {showRawKey ? 'Hide' : 'Reveal'}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => copyText(projectCredentials?.apiKey || currentProject?.apiKey || '')}
+                          className="text-text-secondary hover:text-text-primary"
+                          title="Copy API key"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Step 3: Code snippet */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
+                      Step 2: Initialize in Your Application (e.g. index.ts or App.tsx)
+                    </div>
+                    <button
+                      onClick={() =>
+                        copyText(`import { TraceOps } from '@traceops/browser';
+
+TraceOps.init({
+  apiKey: '${projectCredentials?.apiKey || currentProject?.apiKey || 'YOUR_PROJECT_API_KEY'}',
+  endpoint: '${API_BASE}',
+  serviceName: '${currentProject?.name || 'my-website'}',
+});`)
+                      }
+                      className="inline-flex items-center gap-1 text-[11px] text-accent hover:underline font-mono"
+                    >
+                      <Copy className="w-3 h-3" /> Copy Snippet
+                    </button>
+                  </div>
+                  <pre className="p-3 rounded bg-bg border border-border text-[11px] font-mono text-text-primary overflow-x-auto">
+{`import { TraceOps } from '@traceops/browser';
+
+TraceOps.init({
+  apiKey: '${projectCredentials?.apiKey || currentProject?.apiKey || 'YOUR_PROJECT_API_KEY'}',
+  endpoint: '${API_BASE}',
+  serviceName: '${currentProject?.name || 'my-website'}',
+});
+
+// Automatic: Captures JS errors, Web Vitals (LCP, CLS, INP), and page loads`}
+                  </pre>
+                </div>
+
+                {/* Interactive Test Actions */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-border">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={testIngestionPing}
+                      disabled={testingConnection}
+                      className="inline-flex items-center gap-1.5 bg-accent hover:bg-accent-muted text-white text-xs font-medium px-3.5 py-1.5 rounded transition shadow-sm disabled:opacity-50"
+                    >
+                      <Zap className="w-3.5 h-3.5" />
+                      {testingConnection ? 'Verifying...' : 'Send Test Ingestion Ping'}
+                    </button>
+                    <button
+                      onClick={triggerNormalTelemetry}
+                      disabled={isSimulating}
+                      className="inline-flex items-center gap-1.5 bg-surface hover:bg-surface-hover border border-border text-text-primary text-xs font-medium px-3.5 py-1.5 rounded transition"
+                    >
+                      {isSimulating ? 'Simulating...' : 'Simulate Test Traffic'}
+                    </button>
+                  </div>
+
+                  {connectionTestResult && (
+                    <span
+                      className={`px-2 py-1 rounded text-xs font-mono ${
+                        connectionTestResult === 'success'
+                          ? 'bg-status-success/15 text-status-success border border-status-success/30'
+                          : 'bg-status-error/15 text-status-error border border-status-error/30'
+                      }`}
+                    >
+                      {connectionTestResult === 'success'
+                        ? '✓ Telemetry accepted! Refreshing dashboard...'
+                        : `✗ ${connectionTestResult}`}
+                    </span>
+                  )}
                 </div>
               </div>
             )}
@@ -2294,8 +2418,8 @@ import { TraceOps } from '@traceops/browser';
 
 // Initialize once at website root
 TraceOps.init({
-  apiKey: '${currentProject.apiKey}',
-  endpoint: 'http://localhost:4000', // Or your backend URL
+  apiKey: '${projectCredentials?.apiKey || currentProject.apiKey}',
+  endpoint: '${API_BASE}',
   serviceName: '${currentProject.name}',
 });
 
@@ -2402,8 +2526,20 @@ node simulator/simulate.js ${currentProject.apiKey} normal`}
               </div>
             </div>
           ) : (
-            <div className="rounded border border-border bg-surface p-8 text-center text-xs text-text-secondary">
-              Select or create an application to view SDK setup instructions.
+            <div className="rounded border border-border bg-surface p-12 text-center max-w-md mx-auto my-8 space-y-3">
+              <div className="w-10 h-10 rounded-full bg-accent/10 border border-accent/20 flex items-center justify-center mx-auto text-accent">
+                <FolderPlus className="w-5 h-5" />
+              </div>
+              <h3 className="text-sm font-semibold text-text-primary">No Project Selected</h3>
+              <p className="text-xs text-text-secondary leading-relaxed">
+                Create or select an application to generate a unique API key and view SDK connection instructions.
+              </p>
+              <button
+                onClick={() => setNewProjectModal(true)}
+                className="inline-flex items-center gap-1.5 bg-accent hover:bg-accent-muted text-white text-xs font-medium px-4 py-2 rounded transition shadow-sm"
+              >
+                <Plus className="w-3.5 h-3.5" /> Create Project
+              </button>
             </div>
           )
         )}
