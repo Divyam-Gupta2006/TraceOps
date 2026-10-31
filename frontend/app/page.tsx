@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
 import { io, Socket } from 'socket.io-client';
 import {
   Activity,
@@ -18,7 +19,7 @@ import {
   Globe,
   Key,
   Layers,
-  Lock,
+  FolderPlus,
   LogIn,
   LogOut,
   Moon,
@@ -33,6 +34,7 @@ import {
   User,
   Zap,
 } from 'lucide-react';
+import { useAuth } from '@/context/AuthContext';
 import ServiceMap from '@/components/ServiceMap';
 import RechartsMonitoring from '@/components/RechartsMonitoring';
 import EndpointAnalytics from '@/components/EndpointAnalytics';
@@ -44,11 +46,14 @@ import {
   TimeSeriesPoint,
 } from '@/components/MonitoringCharts';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000').replace(/\/+$/, '');
 
 type TabType = 'overview' | 'performance' | 'errors' | 'traces' | 'logs' | 'topology' | 'connect';
 
 export default function TraceOpsApp() {
+  const router = useRouter();
+  const { user: currentUser, token: authToken, isLoading: authLoading, logout } = useAuth();
+
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [projects, setProjects] = useState<any[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string>('');
@@ -65,16 +70,6 @@ export default function TraceOpsApp() {
   const [testingConnection, setTestingConnection] = useState<boolean>(false);
   const [connectionTestResult, setConnectionTestResult] = useState<string | null>(null);
 
-  // Authentication & Multi-Tenancy State
-  const [currentUser, setCurrentUser] = useState<any>(null);
-  const [authToken, setAuthToken] = useState<string | null>(null);
-  const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
-  const [authEmail, setAuthEmail] = useState<string>('');
-  const [authPassword, setAuthPassword] = useState<string>('');
-  const [authName, setAuthName] = useState<string>('');
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [authLoading, setAuthLoading] = useState<boolean>(false);
   const [projectCredentials, setProjectCredentials] = useState<{ id: string; name: string; apiKey: string } | null>(null);
   const [credentialError, setCredentialError] = useState<string | null>(null);
   const [showRawKey, setShowRawKey] = useState<boolean>(false);
@@ -94,26 +89,12 @@ export default function TraceOpsApp() {
     document.documentElement.classList.toggle('light', initial === 'light');
   }, []);
 
-  // Restore JWT session on startup
+  // Protect route: redirect to login if unauthenticated once auth check finishes
   useEffect(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null;
-    if (token) {
-      setAuthToken(token);
-      fetch(`${API_BASE}/api/auth/me`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-        .then((res) => {
-          if (res.ok) return res.json();
-          throw new Error('Session expired');
-        })
-        .then((user) => setCurrentUser(user))
-        .catch(() => {
-          if (typeof window !== 'undefined') localStorage.removeItem('traceops_jwt');
-          setAuthToken(null);
-          setCurrentUser(null);
-        });
+    if (!authLoading && !currentUser) {
+      router.replace('/login');
     }
-  }, []);
+  }, [authLoading, currentUser, router]);
 
   const toggleTheme = () => {
     const next = theme === 'dark' ? 'light' : 'dark';
@@ -126,16 +107,15 @@ export default function TraceOpsApp() {
   const isDark = theme === 'dark';
 
   const fetchProjects = useCallback(async () => {
+    if (!authToken) return;
     try {
-      const headers: Record<string, string> = {};
-      const token = authToken || (typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null);
-      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${authToken}`,
+      };
       const res = await fetch(`${API_BASE}/api/projects`, { headers });
       if (!res.ok) {
         if (res.status === 401) {
-          setProjects([]);
-          setActiveProjectId('');
-          setDashboard(null);
+          logout();
         }
         return;
       }
@@ -155,18 +135,17 @@ export default function TraceOpsApp() {
     } catch (err) {
       console.error('Failed to fetch projects:', err);
     }
-  }, [authToken]);
+  }, [authToken, logout]);
 
   const fetchDashboard = useCallback(
     async (projId: string, windowArg = timeWindow, isSilent = false) => {
-      if (!projId) return;
+      if (!projId || !authToken) return;
       try {
         const headers: Record<string, string> = {
           'Cache-Control': 'no-cache, no-store, must-revalidate',
           Pragma: 'no-cache',
+          Authorization: `Bearer ${authToken}`,
         };
-        const token = authToken || (typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null);
-        if (token) headers['Authorization'] = `Bearer ${token}`;
         const res = await fetch(
           `${API_BASE}/api/projects/${projId}/dashboard?window=${windowArg}&_t=${Date.now()}`,
           {
@@ -175,7 +154,7 @@ export default function TraceOpsApp() {
           },
         );
         if (res.status === 401) {
-          setDashboard({ error: 'Authentication Required: Please sign in to view project telemetry.' });
+          logout();
           return;
         }
         if (res.status === 403) {
@@ -192,7 +171,7 @@ export default function TraceOpsApp() {
         console.error('Failed to fetch dashboard:', err);
       }
     },
-    [timeWindow, authToken],
+    [timeWindow, authToken, logout],
   );
 
   const fetchProjectCredentials = useCallback(
@@ -200,7 +179,7 @@ export default function TraceOpsApp() {
       if (!projId) return;
       try {
         const headers: Record<string, string> = {};
-        const token = authToken || (typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null);
+        const token = authToken;
         if (token) headers['Authorization'] = `Bearer ${token}`;
         const res = await fetch(`${API_BASE}/api/projects/${projId}/credentials`, { headers });
         if (res.ok) {
@@ -220,51 +199,10 @@ export default function TraceOpsApp() {
     [authToken],
   );
 
-  const handleAuthSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthError(null);
-    setAuthLoading(true);
-    try {
-      const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
-      const body: any = { email: authEmail, password: authPassword };
-      if (authMode === 'register' && authName.trim()) {
-        body.name = authName.trim();
-      }
-      const res = await fetch(`${API_BASE}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.message || 'Authentication failed');
-      }
-      setAuthToken(data.token);
-      setCurrentUser(data.user);
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('traceops_jwt', data.token);
-      }
-      setAuthModalOpen(false);
-      setAuthEmail('');
-      setAuthPassword('');
-      setAuthName('');
-      fetchProjects();
-    } catch (err: any) {
-      setAuthError(err.message || 'An error occurred during authentication.');
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
   const handleLogout = () => {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('traceops_jwt');
-    }
-    setAuthToken(null);
-    setCurrentUser(null);
     setProjectCredentials(null);
     setShowRawKey(false);
-    fetchProjects();
+    logout();
   };
 
   useEffect(() => {
@@ -289,11 +227,7 @@ export default function TraceOpsApp() {
   // Real-time WebSocket subscription + 3s Heartbeat
   useEffect(() => {
     if (!activeProjectId) return;
-    const token =
-      authToken ||
-      (typeof window !== 'undefined'
-        ? localStorage.getItem('traceops_jwt')
-        : null);
+    const token = authToken;
 
     if (!token) return;
 
@@ -366,7 +300,7 @@ socket.on('project:join:error', (error) => {
     if (!newProjectName.trim()) return;
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      const token = authToken || (typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null);
+      const token = authToken;
       if (token) headers['Authorization'] = `Bearer ${token}`;
       const res = await fetch(`${API_BASE}/api/projects`, {
         method: 'POST',
@@ -392,7 +326,7 @@ socket.on('project:join:error', (error) => {
     setIsSimulating(true);
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      const token = authToken || (typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null);
+      const token = authToken;
       if (token) headers['Authorization'] = `Bearer ${token}`;
       await fetch(`${API_BASE}/api/projects/${activeProjectId}/simulate`, {
         method: 'POST',
@@ -410,7 +344,7 @@ socket.on('project:join:error', (error) => {
   const handleResolveIncident = async (id: string) => {
     try {
       const headers: Record<string, string> = {};
-      const token = authToken || (typeof window !== 'undefined' ? localStorage.getItem('traceops_jwt') : null);
+      const token = authToken;
       if (token) headers['Authorization'] = `Bearer ${token}`;
       await fetch(`${API_BASE}/api/incidents/${id}/resolve`, { method: 'POST', headers });
       fetchDashboard(activeProjectId);
@@ -689,6 +623,21 @@ socket.on('project:join:error', (error) => {
     });
   }, [rawLogs, logSearch, logLevelFilter]);
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-bg flex flex-col items-center justify-center gap-3">
+        <div className="w-10 h-10 rounded bg-surface border border-border flex items-center justify-center">
+          <Activity className="w-5 h-5 text-accent animate-pulse" />
+        </div>
+        <span className="text-xs text-text-secondary font-mono">Verifying workspace session...</span>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return null;
+  }
+
   return (
     <div className="min-h-screen bg-bg text-text-primary flex flex-col font-sans transition-colors duration-150">
       {/* Top Navbar */}
@@ -709,20 +658,26 @@ socket.on('project:join:error', (error) => {
           {/* Project Selector */}
           <div className="flex items-center gap-2">
             <span className="text-xs text-text-secondary">Project:</span>
-            <select
-              value={activeProjectId}
-              onChange={(e) => {
-                setSelectedTrace(null);
-                setActiveProjectId(e.target.value);
-              }}
-              className="bg-bg border border-border text-xs rounded px-2.5 py-1 text-text-primary focus:outline-none focus:border-accent font-mono"
-            >
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
+            {projects.length > 0 ? (
+              <select
+                value={activeProjectId}
+                onChange={(e) => {
+                  setSelectedTrace(null);
+                  setActiveProjectId(e.target.value);
+                }}
+                className="bg-bg border border-border text-xs rounded px-2.5 py-1 text-text-primary focus:outline-none focus:border-accent font-mono"
+              >
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="text-xs text-text-muted italic px-2 py-1 bg-bg border border-border rounded font-mono">
+                No projects
+              </span>
+            )}
             <button
               onClick={() => setNewProjectModal(true)}
               className="flex items-center gap-1 text-xs text-text-secondary hover:text-text-primary bg-bg hover:bg-surface-hover px-2 py-1 rounded border border-border transition"
@@ -783,11 +738,7 @@ socket.on('project:join:error', (error) => {
             </div>
           ) : (
             <button
-              onClick={() => {
-                setAuthModalOpen(true);
-                setAuthMode('login');
-                setAuthError(null);
-              }}
+              onClick={() => router.push('/login')}
               className="flex items-center gap-1.5 bg-accent/10 hover:bg-accent/20 text-accent border border-accent/30 px-2.5 py-1 rounded transition text-xs font-medium"
             >
               <LogIn className="w-3 h-3" /> Sign In
@@ -851,7 +802,27 @@ socket.on('project:join:error', (error) => {
 
       {/* Main Container */}
       <main className="flex-1 max-w-[1400px] w-full mx-auto p-5 space-y-5">
-        {dashboard?.error ? (
+        {projects.length === 0 ? (
+          <div className="rounded border border-border bg-surface p-12 text-center max-w-lg mx-auto my-12 space-y-4 shadow-sm">
+            <div className="w-12 h-12 rounded-full bg-accent/10 border border-accent/20 flex items-center justify-center mx-auto text-accent">
+              <FolderPlus className="w-6 h-6" />
+            </div>
+            <div className="space-y-1">
+              <h2 className="text-base font-semibold text-text-primary">No Projects Found</h2>
+              <p className="text-xs text-text-secondary leading-relaxed">
+                You do not have any projects in your workspace yet. Create your first project to receive an API key and start streaming traces and logs.
+              </p>
+            </div>
+            <div className="pt-2">
+              <button
+                onClick={() => setNewProjectModal(true)}
+                className="inline-flex items-center gap-2 bg-accent hover:bg-accent-muted text-white text-xs font-medium px-4 py-2 rounded transition shadow-sm"
+              >
+                <Plus className="w-3.5 h-3.5" /> Create Your First Project
+              </button>
+            </div>
+          </div>
+        ) : dashboard?.error ? (
           <div className="rounded border border-status-error/30 bg-status-error/10 p-10 text-center space-y-3 my-8">
             <ShieldAlert className="w-12 h-12 text-status-error mx-auto" />
             <h3 className="text-base font-semibold text-text-primary">Project Access Restricted</h3>
@@ -859,21 +830,8 @@ socket.on('project:join:error', (error) => {
               {dashboard.error}
             </p>
             <p className="text-xs text-text-muted">
-              Sign in with an account that owns this project or select an authorized project.
+              Select an authorized project or sign in with an authorized account.
             </p>
-            {!currentUser && (
-              <div className="pt-2">
-                <button
-                  onClick={() => {
-                    setAuthModalOpen(true);
-                    setAuthMode('login');
-                  }}
-                  className="px-4 py-2 bg-accent hover:bg-accent-muted text-white text-xs font-medium rounded transition"
-                >
-                  Sign In to Continue
-                </button>
-              </div>
-            )}
           </div>
         ) : (
           <>
@@ -2270,136 +2228,6 @@ node simulator/simulate.js ${currentProject.apiKey} normal`}
               >
                 Create Project
               </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* User Authentication Modal */}
-      {authModalOpen && (
-        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
-          <form
-            onSubmit={handleAuthSubmit}
-            className="bg-surface border border-border rounded p-6 max-w-sm w-full space-y-4 shadow-2xl"
-          >
-            <div className="flex items-center justify-between border-b border-border pb-3">
-              <div className="flex items-center gap-2">
-                <Lock className="w-4 h-4 text-accent" />
-                <h3 className="text-sm font-semibold text-text-primary">
-                  {authMode === 'login' ? 'Sign In to TraceOps' : 'Create an Account'}
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setAuthModalOpen(false)}
-                className="text-xs text-text-muted hover:text-text-primary"
-              >
-                ✕
-              </button>
-            </div>
-
-            {/* Mode Switcher */}
-            <div className="grid grid-cols-2 gap-1 p-1 bg-bg rounded border border-border text-xs">
-              <button
-                type="button"
-                onClick={() => {
-                  setAuthMode('login');
-                  setAuthError(null);
-                }}
-                className={`py-1.5 rounded transition ${
-                  authMode === 'login'
-                    ? 'bg-surface text-text-primary font-semibold shadow-sm'
-                    : 'text-text-secondary hover:text-text-primary'
-                }`}
-              >
-                Sign In
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setAuthMode('register');
-                  setAuthError(null);
-                }}
-                className={`py-1.5 rounded transition ${
-                  authMode === 'register'
-                    ? 'bg-surface text-text-primary font-semibold shadow-sm'
-                    : 'text-text-secondary hover:text-text-primary'
-                }`}
-              >
-                Register
-              </button>
-            </div>
-
-            {authError && (
-              <div className="p-2.5 rounded border border-status-error/30 bg-status-error/10 text-status-error text-xs">
-                {authError}
-              </div>
-            )}
-
-            {authMode === 'register' && (
-              <div>
-                <label className="block text-[11px] uppercase tracking-wider text-text-secondary mb-1">
-                  Full Name (Optional)
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. Alice SRE"
-                  value={authName}
-                  onChange={(e) => setAuthName(e.target.value)}
-                  className="w-full bg-bg border border-border rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent"
-                />
-              </div>
-            )}
-
-            <div>
-              <label className="block text-[11px] uppercase tracking-wider text-text-secondary mb-1">
-                Email Address
-              </label>
-              <input
-                type="email"
-                required
-                placeholder="alice@traceops.io"
-                value={authEmail}
-                onChange={(e) => setAuthEmail(e.target.value)}
-                className="w-full bg-bg border border-border rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent"
-              />
-            </div>
-
-            <div>
-              <label className="block text-[11px] uppercase tracking-wider text-text-secondary mb-1">
-                Password
-              </label>
-              <input
-                type="password"
-                required
-                minLength={6}
-                placeholder="••••••••"
-                value={authPassword}
-                onChange={(e) => setAuthPassword(e.target.value)}
-                className="w-full bg-bg border border-border rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent"
-              />
-            </div>
-
-            <div className="pt-2 flex items-center justify-between gap-3">
-              <span className="text-[10px] text-text-muted">
-                {authMode === 'register' ? 'First account is granted Admin.' : 'Tenant data is isolated.'}
-              </span>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setAuthModalOpen(false)}
-                  className="text-xs px-3 py-1.5 rounded border border-border text-text-secondary hover:text-text-primary hover:bg-surface-hover"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={authLoading}
-                  className="text-xs px-4 py-1.5 rounded bg-accent hover:bg-accent-muted text-white font-medium disabled:opacity-50"
-                >
-                  {authLoading ? 'Please wait...' : authMode === 'login' ? 'Sign In' : 'Create Account'}
-                </button>
-              </div>
             </div>
           </form>
         </div>
