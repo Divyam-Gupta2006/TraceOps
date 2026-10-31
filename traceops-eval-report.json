@@ -1,0 +1,111 @@
+{
+  "timestamp": "2026-10-31T16:22:15.237Z",
+  "endpoints": {
+    "BACKEND_URL": "http://localhost:4000",
+    "FRONTEND_URL": "http://localhost:3000",
+    "PLAYGROUND_URL": "http://localhost:3001"
+  },
+  "summary": {
+    "passed": 7,
+    "failed": 0,
+    "warnings": 0
+  },
+  "metrics": {
+    "avgIngestionLatencyMs": 7.94,
+    "maxIngestionLatencyMs": 9.65,
+    "incidentSample": {
+      "title": "DB deadlock spikes latency",
+      "rootService": "ledger-postgres-db",
+      "affectedServices": [
+        "ledger-postgres-db",
+        "billing-service",
+        "api-gateway"
+      ],
+      "errorRatePeak": 28.6,
+      "latencyPeakMs": 6400,
+      "confidenceScore": 96,
+      "aiHypothesis": "The ledger-postgres-db experienced a sustained deadlock on the ledger_accounts table, as evidenced by repeated DeadlockDetectedException logs and a 6400 ms lock wait. This blocked the SELECT FOR UPDATE call, causing billing-service to return 500 errors and api-gateway to timeout with 504, driving the observed 28.6% error-rate spike.",
+      "aiRecommendations": [
+        "Investigate and refactor the transaction that locks ledger_accounts to use shorter lock scopes or optimistic concurrency",
+        "Add appropriate indexes or partitioning to reduce row contention on ledger_accounts",
+        "Configure PostgreSQL deadlock timeout and enable automatic retry logic in billing-service for transient deadlocks",
+        "Monitor pg_stat_activity and pg_locks dashboards and set alerts for lock-wait times exceeding 2 seconds"
+      ]
+    }
+  },
+  "tests": [
+    {
+      "name": "1. Core Infrastructure Reachability",
+      "status": "PASS",
+      "details": "Backend OK (40.62ms) | Frontend: UP | Playground (http://localhost:3001): UP",
+      "metrics": {
+        "backendLatencyMs": 40.62,
+        "frontendUp": true,
+        "playgroundUp": true
+      }
+    },
+    {
+      "name": "2. Multi-Tenant Project & Credential Provisioning",
+      "status": "PASS",
+      "details": "Created isolated tenants with unique keys (tops_live_d6d5...)",
+      "metrics": {}
+    },
+    {
+      "name": "3. Ingestion Security & API Key Guard",
+      "status": "PASS",
+      "details": "Rejected invalid API key with HTTP 401 in 4.08ms",
+      "metrics": {}
+    },
+    {
+      "name": "4. OTLP Trace Ingestion Throughput (10x 3-Service Traces = 30 Spans)",
+      "status": "PASS",
+      "details": "Avg ingestion latency: 7.94ms (Max: 9.65ms)",
+      "metrics": {
+        "avgIngestMs": 7.94,
+        "maxIngestMs": 9.65
+      }
+    },
+    {
+      "name": "5. Multi-Tenant Data Isolation Check",
+      "status": "PASS",
+      "details": "Tenant B had 0 leaked spans, services, or incidents from Tenant A",
+      "metrics": {}
+    },
+    {
+      "name": "6. Auto-Discovery & Distributed Trace Hierarchy",
+      "status": "PASS",
+      "details": "Discovered [api-gateway, billing-service, ledger-postgres-db] with intact parentSpanId links",
+      "metrics": {
+        "discoveredServices": [
+          "api-gateway",
+          "billing-service",
+          "ledger-postgres-db"
+        ]
+      }
+    },
+    {
+      "name": "7. Root-Cause Localization & AI Incident Synthesis",
+      "status": "PASS",
+      "details": "Root Service Identified: \"ledger-postgres-db\" (Expected: \"ledger-postgres-db\") | Grounded in logs: true",
+      "metrics": {
+        "title": "DB deadlock spikes latency",
+        "rootService": "ledger-postgres-db",
+        "affectedServices": [
+          "ledger-postgres-db",
+          "billing-service",
+          "api-gateway"
+        ],
+        "errorRatePeak": 28.6,
+        "latencyPeakMs": 6400,
+        "confidenceScore": 96,
+        "aiHypothesis": "The ledger-postgres-db experienced a sustained deadlock on the ledger_accounts table, as evidenced by repeated DeadlockDetectedException logs and a 6400 ms lock wait. This blocked the SELECT FOR UPDATE call, causing billing-service to return 500 errors and api-gateway to timeout with 504, driving the observed 28.6% error-rate spike.",
+        "aiRecommendations": [
+          "Investigate and refactor the transaction that locks ledger_accounts to use shorter lock scopes or optimistic concurrency",
+          "Add appropriate indexes or partitioning to reduce row contention on ledger_accounts",
+          "Configure PostgreSQL deadlock timeout and enable automatic retry logic in billing-service for transient deadlocks",
+          "Monitor pg_stat_activity and pg_locks dashboards and set alerts for lock-wait times exceeding 2 seconds"
+        ]
+      }
+    }
+  ]
+}
