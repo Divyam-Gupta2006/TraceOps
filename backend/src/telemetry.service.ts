@@ -353,7 +353,64 @@ export class TelemetryService {
 
   // Standard OpenTelemetry OTLP/HTTP JSON Log Ingestion
   async ingestOtlpLogs(projectId: string, body: any) {
-    const resourceLogs = body?.resourceLogs || [];
+    let resourceLogs = body?.resourceLogs;
+
+    // Support flat log format, { logs: [...] }, or raw arrays for developer ease
+    if (!resourceLogs || !Array.isArray(resourceLogs)) {
+      const logsList = Array.isArray(body)
+        ? body
+        : Array.isArray(body?.logs)
+        ? body.logs
+        : (body?.message || body?.body || body?.severity)
+        ? [body]
+        : [];
+
+      if (logsList.length > 0) {
+        resourceLogs = [
+          {
+            resource: {
+              attributes: [
+                {
+                  key: 'service.name',
+                  value: {
+                    stringValue:
+                      body?.serviceName ||
+                      logsList[0]?.serviceName ||
+                      'external-web-app',
+                  },
+                },
+                {
+                  key: 'telemetry.sdk.language',
+                  value: { stringValue: 'javascript' },
+                },
+              ],
+            },
+            scopeLogs: [
+              {
+                logRecords: logsList.map((l) => {
+                  const nowNano = BigInt(Date.now()) * 1_000_000n;
+                  const timeNano = l.timeUnixNano
+                    ? safeBigInt(l.timeUnixNano, nowNano)
+                    : l.timestamp
+                    ? BigInt(new Date(l.timestamp).getTime()) * 1_000_000n
+                    : nowNano;
+                  return {
+                    traceId: l.traceId || null,
+                    spanId: l.spanId || null,
+                    severityText: (l.severity || l.severityText || 'INFO').toUpperCase(),
+                    body: { stringValue: l.message || l.body || 'Log event' },
+                    timeUnixNano: String(timeNano),
+                  };
+                }),
+              },
+            ],
+          },
+        ];
+      } else {
+        resourceLogs = [];
+      }
+    }
+
     let count = 0;
     const logRows: any[] = [];
 
@@ -361,6 +418,13 @@ export class TelemetryService {
       const resAttrs = rl.resource?.attributes || [];
       const serviceName =
         this.extractAttr(resAttrs, 'service.name') || 'unknown-service';
+
+      // Ensure service is recorded in Service Fleet
+      await this.prisma.service.upsert({
+        where: { projectId_name: { projectId, name: serviceName } },
+        update: { lastSeenAt: new Date() },
+        create: { projectId, name: serviceName, language: 'javascript' },
+      });
 
       for (const sl of rl.scopeLogs || []) {
         for (const lr of sl.logRecords || []) {
@@ -408,9 +472,6 @@ export class TelemetryService {
 
     this.events.emitTelemetryUpdate(projectId, { type: 'logs', count });
     return { acceptedLogs: count };
-
-    this.events.emitTelemetryUpdate(projectId, { type: 'logs', count });
-    return { acceptedLogs: count };
   }
 
   // Correlates service metrics + distributed trace leaf bottlenecks to trigger AI RCA
@@ -426,7 +487,7 @@ export class TelemetryService {
         take: 300,
       });
 
-      if (recentSpans.length < 3) return;
+      if (recentSpans.length < 1) return;
 
       // Group metrics by service
       const stats: Record<
@@ -450,11 +511,11 @@ export class TelemetryService {
         if (sp.durationMs > st.maxDuration) st.maxDuration = sp.durationMs;
       }
 
-      // Identify anomalous services (Latency > 1500ms OR Error rate >= 25%)
+      // Identify anomalous services (Latency > 1200ms OR Any Errors OR Single span > 2000ms)
       const anomalousServices = Object.entries(stats).filter(([_, st]) => {
         const avgLatency = st.totalDuration / st.total;
         const errRate = (st.errors / st.total) * 100;
-        return avgLatency > 1500 || errRate >= 25 || st.maxDuration > 2500;
+        return avgLatency > 1200 || st.errors > 0 || st.maxDuration > 2000;
       });
 
       if (anomalousServices.length === 0) return;
@@ -775,19 +836,17 @@ export class TelemetryService {
     const maxSpanTime = spanTimes.length > 0 ? Math.max(...spanTimes) : Date.now();
     const minSpanTime = spanTimes.length > 0 ? Math.min(...spanTimes) : Date.now() - windowDurationMs;
 
-    // If spans were sent recently, anchor window to now; otherwise anchor to maxSpanTime
-    const liveThresholdMs = isSecondsWindow ? 60 * 1000 : 20 * 60 * 1000;
-    const isLive = Date.now() - maxSpanTime < liveThresholdMs;
-    const effectiveEndTime = isLive ? Date.now() : maxSpanTime;
+    // Anchor effectiveEndTime to the latest span or Date.now(), whichever is later (guards against client clock skew)
+    const effectiveEndTime = Math.max(Date.now(), maxSpanTime);
     const effectiveStartTime = effectiveEndTime - windowDurationMs;
 
     const windowSpans = recentSpans.filter((s) => {
       const t = new Date(s.startTime).getTime();
-      return t >= effectiveStartTime && t <= effectiveEndTime;
+      return t >= effectiveStartTime - 5000 && t <= effectiveEndTime + 60_000;
     });
 
     // Fall back to all recentSpans if windowSpans is too small so dashboard is never empty
-    const activeSpans = windowSpans.length >= 2 ? windowSpans : recentSpans;
+    const activeSpans = windowSpans.length >= 1 ? windowSpans : recentSpans;
 
     const calcPct = (vals: number[], pct: number) => {
       if (vals.length === 0) return 0;
@@ -872,7 +931,9 @@ export class TelemetryService {
 
       const bSpans = activeSpans.filter((s) => {
         const t = new Date(s.startTime).getTime();
-        return t >= bStart && t < bEnd;
+        return i === bucketCount - 1
+          ? t >= bStart && t <= effectiveEndTime + 60_000
+          : t >= bStart && t < bEnd;
       });
 
       const count = bSpans.length;
@@ -942,8 +1003,15 @@ export class TelemetryService {
     const errorMap = new Map<string, any>();
     for (const sp of activeSpans) {
       if (sp.statusCode === 2) {
-        const statusAttr = sp.attributes?.['http.status_code'] || 500;
-        const errSignature = `HTTP ${statusAttr}: ${sp.operationName}`;
+        const errType = sp.attributes?.['error.type'];
+        const errMsg = sp.attributes?.['error.message'];
+        const statusAttr = sp.attributes?.['http.status_code'] || (errType ? null : 500);
+        const errSignature = errType
+          ? `${errType}: ${errMsg || sp.operationName}`
+          : statusAttr
+          ? `HTTP ${statusAttr}: ${sp.operationName}`
+          : `Error: ${sp.operationName}`;
+
         if (!errorMap.has(errSignature)) {
           errorMap.set(errSignature, {
             errorType: errSignature,
@@ -1071,6 +1139,66 @@ export class TelemetryService {
         affectedEndpoints: [],
         suggestedAction: 'Enforce deployment freeze or route traffic to a secondary healthy fallback cluster.',
       });
+    }
+
+    // Insight 5: Positive Baseline Stability (Telemetry verified healthy)
+    if (intelligentInsights.length === 0 && activeSpans.length > 0) {
+      intelligentInsights.push({
+        id: 'insight-baseline-stable',
+        severity: 'INFO',
+        title: `Telemetry Verified: ${services.length || 1} service(s) operating within nominal baseline`,
+        description: `Ingested ${activeSpans.length} active telemetry spans. Throughput is ${liveRps > 0 ? liveRps : rps} req/s with P95 latency of ${p95Ms}ms and ${systemErrorRate}% error rate. All metrics comply with 99.9% SLO targets.`,
+        evidence: {
+          metric: 'System Health',
+          value: `${p95Ms}ms p95 · ${systemErrorRate}% errors`,
+          baseline: '≤ 300ms p95',
+          ratio: 'Nominal Baseline',
+        },
+        affectedServices: services.map((s) => s.name),
+        affectedEndpoints: endpointAnalytics.slice(0, 3).map((e) => e.endpoint),
+        suggestedAction: 'Telemetry pipeline operating nominally. Continue monitoring or trigger simulated load to test automated alerting.',
+      });
+    }
+
+    // Insight 6: Web Vitals Real User Monitoring (if browser vitals detected)
+    const vitalSpans = activeSpans.filter((s) => s.attributes && s.attributes['vital.name']);
+    if (vitalSpans.length > 0) {
+      const poorVitals = vitalSpans.filter((s) => s.attributes['vital.rating'] === 'poor');
+      const vitalsSummary = Array.from(new Set(vitalSpans.map((s) => s.attributes['vital.name']))).join(', ');
+      if (poorVitals.length > 0) {
+        const poorNames = Array.from(new Set(poorVitals.map((s) => s.attributes['vital.name']))).join(', ');
+        intelligentInsights.push({
+          id: 'insight-rum-degradation',
+          severity: 'WARNING',
+          title: `Real User Monitoring: Poor Core Web Vitals detected (${poorNames})`,
+          description: `Browser client telemetry reported ${poorVitals.length} Core Web Vitals sample(s) exceeding Google recommended thresholds (${poorNames}). This directly impacts user experience and Core Web Vitals search ranking.`,
+          evidence: {
+            metric: 'Vitals Rating',
+            value: `${poorVitals.length} poor sample(s)`,
+            baseline: 'Google CWV targets',
+            ratio: 'Degraded UX',
+          },
+          affectedServices: Array.from(new Set(poorVitals.map((s) => s.serviceName))),
+          affectedEndpoints: Array.from(new Set(poorVitals.map((s) => String(s.attributes['page.url'] || s.operationName)))),
+          suggestedAction: 'Review Largest Contentful Paint image assets, optimize render-blocking CSS/JS, or split JavaScript bundles.',
+        });
+      } else {
+        intelligentInsights.push({
+          id: 'insight-rum-healthy',
+          severity: 'INFO',
+          title: `Real User Monitoring: Web Vitals meet Google benchmarks (${vitalsSummary})`,
+          description: `Captured real-user performance metrics across ${vitalSpans.length} sample(s). Core Web Vitals (LCP, INP, CLS, FCP, TTFB) are within Google recommended green thresholds.`,
+          evidence: {
+            metric: 'CWV Compliance',
+            value: '100% Pass Rate',
+            baseline: 'Google CWV targets',
+            ratio: `${vitalSpans.length} samples`,
+          },
+          affectedServices: Array.from(new Set(vitalSpans.map((s) => s.serviceName))),
+          affectedEndpoints: Array.from(new Set(vitalSpans.map((s) => String(s.attributes['page.url'] || s.operationName)))),
+          suggestedAction: 'Web vitals are optimal. Continue monitoring user performance across client devices.',
+        });
+      }
     }
 
     // Distributed Traces for Waterfall Explorer

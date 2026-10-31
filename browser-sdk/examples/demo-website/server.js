@@ -47,7 +47,7 @@ const server = http.createServer((req, res) => {
     return res.end(
       JSON.stringify({
         apiKey: process.env.TRACEOPS_API_KEY || '',
-        endpoint: process.env.TRACEOPS_ENDPOINT || 'http://localhost:4000',
+        endpoint: process.env.TRACEOPS_ENDPOINT || 'https://traceops-backend-j7b0.onrender.com',
       }),
     );
   }

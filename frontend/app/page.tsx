@@ -368,13 +368,92 @@ socket.on('project:join:error', (error) => {
     return projects.length > 0 ? projects[0] : null;
   }, [dashboard, projects, activeProjectId]);
 
+  const [showQuickstartSnippet, setShowQuickstartSnippet] = useState<boolean>(true);
+
   const activeApiKey = projectCredentials?.apiKey || (currentProject?.apiKey?.includes('••••') ? '' : currentProject?.apiKey) || '';
 
-  const testIngestionPing = async () => {
+  const testIngestionPing = async (simulateError = false) => {
     if (!activeApiKey) return;
     setTestingConnection(true);
     setConnectionTestResult(null);
     try {
+      const svc = currentProject?.name || 'my-website';
+      const nowMs = Date.now();
+
+      // 1. Send realistic browser spans: Pageview + Web Vitals + API Calls (+ optional error)
+      const spans: any[] = [
+        {
+          name: 'web-vital: LCP',
+          durationMs: 1150,
+          statusCode: 1,
+          startTime: new Date(nowMs - 1200),
+          attributes: { 'vital.name': 'LCP', 'vital.value': 1150, 'vital.rating': 'good' },
+        },
+        {
+          name: 'web-vital: INP',
+          durationMs: 42,
+          statusCode: 1,
+          startTime: new Date(nowMs - 600),
+          attributes: { 'vital.name': 'INP', 'vital.value': 42, 'vital.rating': 'good' },
+        },
+        {
+          name: 'web-vital: CLS',
+          durationMs: 1,
+          statusCode: 1,
+          startTime: new Date(nowMs - 500),
+          attributes: { 'vital.name': 'CLS', 'vital.value': 0.02, 'vital.rating': 'good' },
+        },
+        {
+          name: 'web-vital: FCP',
+          durationMs: 780,
+          statusCode: 1,
+          startTime: new Date(nowMs - 1500),
+          attributes: { 'vital.name': 'FCP', 'vital.value': 780, 'vital.rating': 'good' },
+        },
+        {
+          name: 'web-vital: TTFB',
+          durationMs: 140,
+          statusCode: 1,
+          startTime: new Date(nowMs - 1800),
+          attributes: { 'vital.name': 'TTFB', 'vital.value': 140, 'vital.rating': 'good' },
+        },
+        {
+          name: 'GET /',
+          durationMs: 240,
+          statusCode: 1,
+          startTime: new Date(nowMs - 2000),
+          attributes: { 'http.status_code': 200, 'page.url': 'https://myapp.com/' },
+        },
+        {
+          name: 'GET /api/catalog',
+          durationMs: 65,
+          statusCode: 1,
+          startTime: new Date(nowMs - 1000),
+          attributes: { 'http.status_code': 200 },
+        },
+        {
+          name: 'POST /api/cart/add',
+          durationMs: 110,
+          statusCode: 1,
+          startTime: new Date(nowMs - 400),
+          attributes: { 'http.status_code': 200, 'cart.items': 2 },
+        },
+      ];
+
+      if (simulateError) {
+        spans.push({
+          name: 'POST /api/checkout/pay',
+          durationMs: 3100,
+          statusCode: 2,
+          startTime: new Date(nowMs - 100),
+          attributes: {
+            'error.type': 'PaymentGatewayTimeout',
+            'error.message': 'Stripe card authorization timed out after 3000ms',
+            'http.status_code': 504,
+          },
+        });
+      }
+
       const res = await fetch(`${API_BASE}/v1/traces`, {
         method: 'POST',
         headers: {
@@ -382,16 +461,54 @@ socket.on('project:join:error', (error) => {
           'x-traceops-key': activeApiKey,
         },
         body: JSON.stringify({
-          serviceName: currentProject?.name || 'test-client',
-          operationName: 'GET /health-check',
-          durationMs: 45,
-          statusCode: 200,
+          serviceName: svc,
+          spans,
         }),
       });
+
+      // 2. Send correlated logs so Logs tab and incident triage are fully populated
+      const logs: any[] = [
+        {
+          severity: 'INFO',
+          message: `[@traceops/browser] Initialized on client for "${svc}"`,
+          timestamp: new Date(nowMs - 2100).toISOString(),
+        },
+        {
+          severity: 'INFO',
+          message: 'PerformanceObserver recorded Core Web Vitals: LCP=1150ms, INP=42ms, CLS=0.02 (100% Good)',
+          timestamp: new Date(nowMs - 1100).toISOString(),
+        },
+        {
+          severity: 'INFO',
+          message: 'Catalog loaded with 24 active products. User navigated to cart checkout.',
+          timestamp: new Date(nowMs - 350).toISOString(),
+        },
+      ];
+
+      if (simulateError) {
+        logs.push({
+          severity: 'ERROR',
+          message: 'PaymentGatewayTimeout: Stripe payment token validation exceeded 3000ms threshold on /api/checkout/pay',
+          timestamp: new Date(nowMs - 50).toISOString(),
+        });
+      }
+
+      await fetch(`${API_BASE}/v1/logs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-traceops-key': activeApiKey,
+        },
+        body: JSON.stringify({
+          serviceName: svc,
+          logs,
+        }),
+      }).catch(() => {});
+
       if (res.ok) {
-        setConnectionTestResult('success');
+        setConnectionTestResult(simulateError ? 'error-simulated' : 'success');
         fetchDashboard(activeProjectId);
-        setTimeout(() => setConnectionTestResult(null), 4000);
+        setTimeout(() => setConnectionTestResult(null), 5000);
       } else {
         setConnectionTestResult(`failed: HTTP ${res.status}`);
       }
@@ -895,103 +1012,118 @@ socket.on('project:join:error', (error) => {
             {/* ===================== TAB 1: OVERVIEW ===================== */}
         {activeTab === 'overview' && (
           <div className="space-y-6">
-            {/* Empty Telemetry State / Getting Started Quickstart */}
-            {totalRequests === 0 && (
-              <div className="rounded border border-accent/40 bg-surface p-6 space-y-4 shadow-sm">
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-8 h-8 rounded-full bg-accent/15 border border-accent/30 flex items-center justify-center text-accent">
-                      <Zap className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-semibold text-text-primary">
-                        Connect Your Website to TraceOps
-                      </h3>
-                      <p className="text-xs text-text-secondary">
-                        Project &ldquo;{currentProject?.name}&rdquo; is active. Add this 4-line snippet to your website to start collecting real-time telemetry.
-                      </p>
-                    </div>
+            {/* Getting Started Quickstart & SDK Verification Controls */}
+            <div className="rounded border border-accent/40 bg-surface p-5 space-y-4 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-full bg-accent/15 border border-accent/30 flex items-center justify-center text-accent">
+                    <Zap className="w-4 h-4" />
                   </div>
-                  <button
-                    onClick={() => setActiveTab('connect')}
-                    className="inline-flex items-center gap-1.5 text-xs text-accent hover:underline font-medium"
-                  >
-                    View All SDK Options →
-                  </button>
+                  <div>
+                    <h3 className="text-sm font-semibold text-text-primary flex items-center gap-2">
+                      Connect Your Website to TraceOps
+                      {totalRequests > 0 && (
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-status-success/15 text-status-success border border-status-success/30">
+                          Pipeline Active ({totalRequests} reqs)
+                        </span>
+                      )}
+                    </h3>
+                    <p className="text-xs text-text-secondary">
+                      Project &ldquo;{currentProject?.name}&rdquo; is active. Install <code className="text-accent font-mono">@traceops/browser</code> or test the pipeline below.
+                    </p>
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {/* Step 1: Install */}
-                  <div className="space-y-1.5">
-                    <div className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
-                      Step 1: Install Package
-                    </div>
-                    <pre className="p-2.5 rounded bg-bg border border-border text-xs font-mono text-text-primary flex items-center justify-between">
-                      <span>npm install @traceops/browser</span>
-                      <button
-                        onClick={() => copyText('npm install @traceops/browser')}
-                        className="text-text-secondary hover:text-text-primary ml-2"
-                        title="Copy install command"
-                      >
-                        <Copy className="w-3.5 h-3.5" />
-                      </button>
-                    </pre>
-                  </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowQuickstartSnippet(!showQuickstartSnippet)}
+                    className="inline-flex items-center gap-1 text-xs text-text-secondary hover:text-text-primary border border-border bg-bg px-2.5 py-1 rounded transition font-medium"
+                  >
+                    {showQuickstartSnippet ? 'Hide Snippet' : 'Show SDK Snippet'}
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('connect')}
+                    className="inline-flex items-center gap-1 text-xs text-accent hover:underline font-medium"
+                  >
+                    All SDK Options →
+                  </button>
+                </div>
+              </div>
 
-                  {/* Step 2: Copy Key */}
-                  <div className="space-y-1.5">
-                    <div className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
-                      Project Ingestion API Key
-                    </div>
-                    <div className="p-2 rounded bg-bg border border-border text-xs font-mono text-status-success flex items-center justify-between">
-                      <span className="truncate mr-2">
-                        {showRawKey && projectCredentials?.apiKey
-                          ? projectCredentials.apiKey
-                          : projectCredentials?.apiKey || currentProject?.apiKey || 'tops_live_••••••••'}
-                      </span>
-                      <div className="flex items-center gap-1.5 flex-shrink-0">
-                        {projectCredentials?.apiKey && (
-                          <button
-                            onClick={() => setShowRawKey(!showRawKey)}
-                            className="text-text-secondary hover:text-text-primary text-[11px] font-sans"
-                          >
-                            {showRawKey ? 'Hide' : 'Reveal'}
-                          </button>
-                        )}
+              {showQuickstartSnippet && (
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* Step 1: Install */}
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
+                        Step 1: Install Package
+                      </div>
+                      <pre className="p-2.5 rounded bg-bg border border-border text-xs font-mono text-text-primary flex items-center justify-between">
+                        <span>npm install @traceops/browser</span>
                         <button
-                          onClick={() => copyText(projectCredentials?.apiKey || currentProject?.apiKey || '')}
-                          className="text-text-secondary hover:text-text-primary"
-                          title="Copy API key"
+                          onClick={() => copyText('npm install @traceops/browser')}
+                          className="text-text-secondary hover:text-text-primary ml-2"
+                          title="Copy install command"
                         >
                           <Copy className="w-3.5 h-3.5" />
                         </button>
+                      </pre>
+                    </div>
+
+                    {/* Step 2: Copy Key */}
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
+                        Project Ingestion API Key
+                      </div>
+                      <div className="p-2 rounded bg-bg border border-border text-xs font-mono text-status-success flex items-center justify-between">
+                        <span className="truncate mr-2">
+                          {showRawKey && projectCredentials?.apiKey
+                            ? projectCredentials.apiKey
+                            : projectCredentials?.apiKey || currentProject?.apiKey || 'tops_live_••••••••'}
+                        </span>
+                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                          {projectCredentials?.apiKey && (
+                            <button
+                              onClick={() => setShowRawKey(!showRawKey)}
+                              className="text-text-secondary hover:text-text-primary text-[11px] font-sans"
+                            >
+                              {showRawKey ? 'Hide' : 'Reveal'}
+                            </button>
+                          )}
+                          <button
+                            onClick={() => copyText(projectCredentials?.apiKey || currentProject?.apiKey || '')}
+                            className="text-text-secondary hover:text-text-primary"
+                            title="Copy API key"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
 
-                {/* Step 3: Code snippet */}
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <div className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
-                      Step 2: Initialize in Your Application (e.g. index.ts or App.tsx)
-                    </div>
-                    <button
-                      onClick={() =>
-                        copyText(`import { TraceOps } from '@traceops/browser';
+                  {/* Step 3: Code snippet */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <div className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
+                        Step 2: Initialize in Your Application (e.g. index.ts or App.tsx)
+                      </div>
+                      <button
+                        onClick={() =>
+                          copyText(`import { TraceOps } from '@traceops/browser';
 
 TraceOps.init({
   apiKey: '${projectCredentials?.apiKey || currentProject?.apiKey || 'YOUR_PROJECT_API_KEY'}',
   endpoint: '${API_BASE}',
   serviceName: '${currentProject?.name || 'my-website'}',
 });`)
-                      }
-                      className="inline-flex items-center gap-1 text-[11px] text-accent hover:underline font-mono"
-                    >
-                      <Copy className="w-3 h-3" /> Copy Snippet
-                    </button>
-                  </div>
-                  <pre className="p-3 rounded bg-bg border border-border text-[11px] font-mono text-text-primary overflow-x-auto">
+                        }
+                        className="inline-flex items-center gap-1 text-[11px] text-accent hover:underline font-mono"
+                      >
+                        <Copy className="w-3 h-3" /> Copy Snippet
+                      </button>
+                    </div>
+                    <pre className="p-3 rounded bg-bg border border-border text-[11px] font-mono text-text-primary overflow-x-auto">
 {`import { TraceOps } from '@traceops/browser';
 
 TraceOps.init({
@@ -1001,45 +1133,56 @@ TraceOps.init({
 });
 
 // Automatic: Captures JS errors, Web Vitals (LCP, CLS, INP), and page loads`}
-                  </pre>
-                </div>
-
-                {/* Interactive Test Actions */}
-                <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-border">
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={testIngestionPing}
-                      disabled={testingConnection}
-                      className="inline-flex items-center gap-1.5 bg-accent hover:bg-accent-muted text-white text-xs font-medium px-3.5 py-1.5 rounded transition shadow-sm disabled:opacity-50"
-                    >
-                      <Zap className="w-3.5 h-3.5" />
-                      {testingConnection ? 'Verifying...' : 'Send Test Ingestion Ping'}
-                    </button>
-                    <button
-                      onClick={triggerNormalTelemetry}
-                      disabled={isSimulating}
-                      className="inline-flex items-center gap-1.5 bg-surface hover:bg-surface-hover border border-border text-text-primary text-xs font-medium px-3.5 py-1.5 rounded transition"
-                    >
-                      {isSimulating ? 'Simulating...' : 'Simulate Test Traffic'}
-                    </button>
+                    </pre>
                   </div>
+                </>
+              )}
 
-                  {connectionTestResult && (
-                    <span
-                      className={`px-2 py-1 rounded text-xs font-mono ${
-                        connectionTestResult === 'success'
-                          ? 'bg-status-success/15 text-status-success border border-status-success/30'
-                          : 'bg-status-error/15 text-status-error border border-status-error/30'
-                      }`}
-                    >
-                      {connectionTestResult === 'success'
-                        ? '✓ Telemetry accepted! Refreshing dashboard...'
-                        : `✗ ${connectionTestResult}`}
-                    </span>
-                  )}
+              {/* Interactive Test Actions */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-border">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => testIngestionPing(false)}
+                    disabled={testingConnection}
+                    className="inline-flex items-center gap-1.5 bg-accent hover:bg-accent-muted text-white text-xs font-medium px-3.5 py-1.5 rounded transition shadow-sm disabled:opacity-50"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    {testingConnection ? 'Streaming...' : 'Send Test Pipeline Telemetry (Vitals + Logs)'}
+                  </button>
+                  <button
+                    onClick={() => testIngestionPing(true)}
+                    disabled={testingConnection}
+                    className="inline-flex items-center gap-1.5 bg-status-error/15 hover:bg-status-error/25 text-status-error border border-status-error/30 text-xs font-medium px-3 py-1.5 rounded transition disabled:opacity-50"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    Simulate Incident Error Spike
+                  </button>
+                  <button
+                    onClick={triggerNormalTelemetry}
+                    disabled={isSimulating}
+                    className="inline-flex items-center gap-1.5 bg-surface hover:bg-surface-hover border border-border text-text-primary text-xs font-medium px-3 py-1.5 rounded transition"
+                  >
+                    {isSimulating ? 'Simulating...' : 'Simulate Backend Fleet'}
+                  </button>
                 </div>
+
+                {connectionTestResult && (
+                  <span
+                    className={`px-2.5 py-1 rounded text-xs font-mono ${
+                      connectionTestResult === 'success' || connectionTestResult === 'error-simulated'
+                        ? 'bg-status-success/15 text-status-success border border-status-success/30'
+                        : 'bg-status-error/15 text-status-error border border-status-error/30'
+                    }`}
+                  >
+                    {connectionTestResult === 'success'
+                      ? '✓ Verified! Spans, Web Vitals & Logs ingested into pipeline.'
+                      : connectionTestResult === 'error-simulated'
+                      ? '⚠️ Incident Error Spike ingested! Evaluating AI RCA triage...'
+                      : `✗ ${connectionTestResult}`}
+                  </span>
+                )}
               </div>
-            )}
+            </div>
 
             {/* Core Web Vitals RUM Section */}
             {Object.keys(webVitalsMetrics).length > 0 && (
@@ -2354,12 +2497,21 @@ TraceOps.init({
                   </button>
 
                   <button
-                    onClick={testIngestionPing}
+                    onClick={() => testIngestionPing(false)}
                     disabled={testingConnection}
-                    className="flex items-center gap-1 bg-bg hover:bg-surface-hover text-text-primary border border-border px-3 py-1.5 rounded transition disabled:opacity-50"
+                    className="flex items-center gap-1.5 bg-accent hover:bg-accent-muted text-white px-3 py-1.5 rounded transition shadow-sm font-sans font-medium text-xs disabled:opacity-50"
                   >
-                    <Zap className="w-3.5 h-3.5 text-accent" />
-                    {testingConnection ? 'Pinging...' : 'Send Test Ping'}
+                    <Zap className="w-3.5 h-3.5" />
+                    {testingConnection ? 'Streaming...' : 'Verify Pipeline (Vitals + Logs)'}
+                  </button>
+
+                  <button
+                    onClick={() => testIngestionPing(true)}
+                    disabled={testingConnection}
+                    className="flex items-center gap-1.5 bg-status-error/15 hover:bg-status-error/25 text-status-error border border-status-error/30 px-3 py-1.5 rounded transition font-sans font-medium text-xs disabled:opacity-50"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    Simulate Incident Error Spike
                   </button>
 
                   {credentialError && (
@@ -2370,14 +2522,16 @@ TraceOps.init({
 
                   {connectionTestResult && (
                     <span
-                      className={`px-2 py-1 rounded text-[11px] font-sans ${
-                        connectionTestResult === 'success'
+                      className={`px-2.5 py-1 rounded text-[11px] font-sans ${
+                        connectionTestResult === 'success' || connectionTestResult === 'error-simulated'
                           ? 'bg-status-success/15 text-status-success border border-status-success/30'
                           : 'bg-status-error/15 text-status-error border border-status-error/30'
                       }`}
                     >
                       {connectionTestResult === 'success'
-                        ? '✓ Verified! Trace accepted.'
+                        ? '✓ Verified! Spans, Web Vitals & Logs ingested into pipeline.'
+                        : connectionTestResult === 'error-simulated'
+                        ? '⚠️ Incident Error Spike ingested! Evaluating AI RCA triage...'
                         : `✗ ${connectionTestResult}`}
                     </span>
                   )}
@@ -2442,7 +2596,7 @@ TraceOps.captureLog({ message: 'User updated cart', severity: 'INFO' });`}
                     Zero packages required. Lightweight OTLP fetch helper:
                   </p>
                   <pre className="p-3 rounded bg-bg border border-border text-[11px] font-mono text-text-primary overflow-x-auto">
-{`const TRACEOPS_URL = 'http://localhost:4000';
+{`const TRACEOPS_URL = '${API_BASE}';
 
 function reportTrace(op, durationMs = 50, isError = false) {
   fetch(\`\${TRACEOPS_URL}/v1/traces\`, {
@@ -2462,11 +2616,11 @@ function reportTrace(op, durationMs = 50, isError = false) {
                   </pre>
                 </div>
 
-                {/* Method 2: Next.js instrumentation.ts */}
+                {/* Method 3: Next.js instrumentation.ts */}
                 <div className="rounded border border-border bg-surface p-4 space-y-2.5">
                   <div className="flex items-center justify-between">
                     <h4 className="text-xs font-semibold uppercase tracking-wider text-text-primary flex items-center gap-1.5">
-                      <Code2 className="w-3.5 h-3.5 text-accent" /> 2. Next.js (`instrumentation.ts`)
+                      <Code2 className="w-3.5 h-3.5 text-accent" /> 3. Next.js (\`instrumentation.ts\`)
                     </h4>
                     <span className="text-[10px] font-mono text-text-secondary">Next.js 13/14/15</span>
                   </div>
@@ -2483,16 +2637,16 @@ export function register() {
 
 // Deployment Environment Variables:
 OTEL_EXPORTER_OTLP_PROTOCOL="http/json"
-OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4000"
+OTEL_EXPORTER_OTLP_ENDPOINT="${API_BASE}"
 OTEL_EXPORTER_OTLP_HEADERS="x-traceops-key=${currentProject.apiKey}"`}
                   </pre>
                 </div>
 
-                {/* Method 3: Standard OTEL Backend */}
+                {/* Method 4: Backend OpenTelemetry SDK */}
                 <div className="rounded border border-border bg-surface p-4 space-y-2.5">
                   <div className="flex items-center justify-between">
                     <h4 className="text-xs font-semibold uppercase tracking-wider text-text-primary flex items-center gap-1.5">
-                      <Server className="w-3.5 h-3.5 text-accent" /> 3. Backend OpenTelemetry SDK
+                      <Server className="w-3.5 h-3.5 text-accent" /> 4. Backend OpenTelemetry SDK
                     </h4>
                     <span className="text-[10px] font-mono text-text-secondary">Node / Python / Go</span>
                   </div>
@@ -2502,7 +2656,7 @@ OTEL_EXPORTER_OTLP_HEADERS="x-traceops-key=${currentProject.apiKey}"`}
                   <pre className="p-3 rounded bg-bg border border-border text-[11px] font-mono text-text-primary overflow-x-auto">
 {`OTEL_SERVICE_NAME="${currentProject.name}"
 OTEL_EXPORTER_OTLP_PROTOCOL="http/json"
-OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4000"
+OTEL_EXPORTER_OTLP_ENDPOINT="${API_BASE}"
 OTEL_EXPORTER_OTLP_HEADERS="x-traceops-key=${currentProject.apiKey}"`}
                   </pre>
                 </div>
