@@ -7,7 +7,7 @@ services:
     restart: always
     environment:
       POSTGRES_USER: traceops
-      POSTGRES_PASSWORD: traceopspassword
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: traceops_db
     ports:
       - '5432:5432'
