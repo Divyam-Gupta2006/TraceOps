@@ -1380,7 +1380,7 @@ export class TelemetryService {
                           'UpstreamTimeoutException: POST http://payment-service/payments/charge timed out after 8000ms (504 Gateway Timeout).',
                       },
                     },
-                  ],
+                  ],    
                 },
               ],
             },
