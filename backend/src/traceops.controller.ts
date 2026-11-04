@@ -147,4 +147,14 @@ export class TraceOpsController {
     const project = await this.telemetry.validateApiKey(apiKey);
     return this.telemetry.ingestOtlpLogs(project.id, body);
   }
+
+  @Get('health')
+  checkHealth() {
+    return {
+      status: 'ok',
+      service: 'traceops-backend',
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+    };
+  }
 }
